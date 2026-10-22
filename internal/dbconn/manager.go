@@ -1,0 +1,159 @@
+package dbconn
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// ConnectionGetter mendefinisikan interface minimal untuk mengambil detail koneksi dari repo.
+type ConnectionGetter interface {
+	GetByID(ctx context.Context, id int64) (Connection, error)
+}
+
+// Manager bertanggung jawab mengelola connection pool (*pgxpool.Pool) untuk setiap target database.
+// Pool dibuat secara lazy, di-cache, dan di-invalidate ketika konfigurasi koneksi berubah.
+type Manager interface {
+	Pool(ctx context.Context, dbID int64) (*pgxpool.Pool, error)
+	Invalidate(dbID int64)
+	CloseAll()
+	TestConnection(ctx context.Context, conn Connection, plainPassword string) error
+}
+
+// DefaultManager adalah implementasi bawaan dari interface Manager.
+type DefaultManager struct {
+	repo      ConnectionGetter
+	secretKey []byte
+	pools     map[int64]*pgxpool.Pool
+	mu        sync.RWMutex
+}
+
+// NewManager membuat instance DefaultManager baru.
+func NewManager(repo ConnectionGetter, secretKey []byte) *DefaultManager {
+	return &DefaultManager{
+		repo:      repo,
+		secretKey: secretKey,
+		pools:     make(map[int64]*pgxpool.Pool),
+	}
+}
+
+// Pool mengembalikan *pgxpool.Pool untuk dbID tertentu.
+// Jika belum ada di cache, pool akan dibuat baru secara lazy dan divalidasi dengan Ping.
+func (m *DefaultManager) Pool(ctx context.Context, dbID int64) (*pgxpool.Pool, error) {
+	// 1. Cek cache (read lock)
+	m.mu.RLock()
+	pool, exists := m.pools[dbID]
+	m.mu.RUnlock()
+
+	if exists {
+		// Verifikasi koneksi masih sehat
+		pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+		defer pingCancel()
+		if err := pool.Ping(pingCtx); err == nil {
+			return pool, nil
+		}
+		// Jika ping gagal, invalidasi pool lama
+		m.Invalidate(dbID)
+	}
+
+	// 2. Buat pool baru (write lock)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Double check setelah write lock
+	if pool, exists := m.pools[dbID]; exists {
+		return pool, nil
+	}
+
+	// Ambil metadata koneksi dari repo platform
+	conn, err := m.repo.GetByID(ctx, dbID)
+	if err != nil {
+		return nil, err // ErrNotFound atau err internal
+	}
+
+	// Dekripsi password
+	plainPassword, err := Decrypt(conn.PasswordEnc, m.secretKey)
+	if err != nil {
+		return nil, fmt.Errorf("gagal mendekripsi password koneksi: %w", err)
+	}
+
+	// Buat pgxpool baru dengan timeout koneksi
+	dsn := conn.BuildDSN(string(plainPassword))
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+
+	// Konfigurasi pool standar
+	cfg.MaxConns = 10
+	cfg.MinConns = 1
+	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MaxConnLifetime = 30 * time.Minute
+
+	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer connectCancel()
+
+	newPool, err := pgxpool.NewWithConfig(connectCtx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%w: tidak dapat membuat pool", ErrUnavailable)
+	}
+
+	// Pastikan ping berhasil
+	if err := newPool.Ping(connectCtx); err != nil {
+		newPool.Close()
+		return nil, fmt.Errorf("%w: koneksi gagal merespons", ErrUnavailable)
+	}
+
+	m.pools[dbID] = newPool
+	return newPool, nil
+}
+
+// Invalidate menutup dan menghapus pool target database dari cache memory.
+func (m *DefaultManager) Invalidate(dbID int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if pool, exists := m.pools[dbID]; exists {
+		pool.Close()
+		delete(m.pools, dbID)
+	}
+}
+
+// CloseAll menutup semua connection pool yang aktif. Dipanggil saat server shutdown.
+func (m *DefaultManager) CloseAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id, pool := range m.pools {
+		pool.Close()
+		delete(m.pools, id)
+	}
+}
+
+// TestConnection menguji apakah konfigurasi koneksi target DB valid dan dapat dihubungi.
+// Menggunakan batas waktu (timeout) 5 detik dan tidak membocorkan detail DSN/password.
+func (m *DefaultManager) TestConnection(ctx context.Context, conn Connection, plainPassword string) error {
+	dsn := conn.BuildDSN(plainPassword)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("%w: parameter koneksi tidak valid", ErrUnavailable)
+	}
+
+	testCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	testPool, err := pgxpool.NewWithConfig(testCtx, cfg)
+	if err != nil {
+		return fmt.Errorf("%w: gagal membuka koneksi", ErrUnavailable)
+	}
+	defer testPool.Close()
+
+	if err := testPool.Ping(testCtx); err != nil {
+		return fmt.Errorf("%w: koneksi ditolak atau timeout", ErrUnavailable)
+	}
+
+	return nil
+}
