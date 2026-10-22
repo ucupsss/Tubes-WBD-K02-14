@@ -1,0 +1,19 @@
+{{ define "layout" }}
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .Title }} · DB Platform</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <main class="container">
+    {{ with .Flash }}
+      <div class="flash flash-{{ .Kind }}">{{ .Message }}</div>
+    {{ end }}
+    {{ template "content" . }}
+  </main>
+</body>
+</html>
+{{ end }}

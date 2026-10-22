@@ -1,0 +1,23 @@
+/* Custom styles for Database Management Platform */
+.field-error {
+  color: #d32f2f;
+  font-size: 0.85rem;
+  margin-top: 0.25rem;
+  display: block;
+}
+
+.table-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.btn-danger {
+  background-color: #d32f2f;
+  border-color: #b71c1c;
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background-color: #b71c1c;
+}
