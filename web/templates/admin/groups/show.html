@@ -1,0 +1,85 @@
+{{ define "content" }}
+{{ $g := .Data.Detail.Group }}
+<div class="page-header">
+  <h1>Group: {{ $g.Name }}</h1>
+  <a href="/admin/groups/{{ $g.ID }}/access" role="button" class="secondary outline">Akses Database</a>
+</div>
+
+<section>
+  <h2>Ubah Group</h2>
+  <form method="post" action="/admin/groups/{{ $g.ID }}/edit">
+    <input type="hidden" name="_csrf" value="{{ .CSRFToken }}">
+
+    <label for="name">Nama Group</label>
+    <input id="name" name="name" value="{{ .Data.Input.Name }}" maxlength="64" required>
+    {{ with .Data.Errors.name }}<small class="field-error">{{ . }}</small>{{ end }}
+
+    <label for="description">Deskripsi</label>
+    <textarea id="description" name="description" maxlength="500">{{ .Data.Input.Description }}</textarea>
+    {{ with .Data.Errors.description }}<small class="field-error">{{ . }}</small>{{ end }}
+
+    <div class="form-actions">
+      <button type="submit">Simpan Perubahan</button>
+    </div>
+  </form>
+</section>
+
+<section>
+  <h2>Anggota ({{ len .Data.Detail.Members }})</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Username</th>
+        <th>Status</th>
+        <th>Aksi</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Data.Detail.Members }}
+      <tr>
+        <td>{{ .Username }}</td>
+        <td>{{ if .IsActive }}Aktif{{ else }}Nonaktif{{ end }}</td>
+        <td>
+          <form method="post" action="/admin/groups/{{ $g.ID }}/members/{{ .UserID }}/delete" style="display:inline;">
+            <input type="hidden" name="_csrf" value="{{ $.CSRFToken }}">
+            <button type="submit" class="secondary outline">Keluarkan</button>
+          </form>
+        </td>
+      </tr>
+      {{ else }}
+      <tr>
+        <td colspan="3">Group ini belum punya anggota.</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+
+  {{ if .Data.Detail.Candidates }}
+  <form method="post" action="/admin/groups/{{ $g.ID }}/members">
+    <input type="hidden" name="_csrf" value="{{ .CSRFToken }}">
+    <label for="user_id">Tambah anggota</label>
+    <select id="user_id" name="user_id" required>
+      <option value="">— pilih user —</option>
+      {{ range .Data.Detail.Candidates }}
+      <option value="{{ .ID }}">{{ .Username }}</option>
+      {{ end }}
+    </select>
+    <div class="form-actions">
+      <button type="submit">Tambahkan</button>
+    </div>
+  </form>
+  {{ else }}
+  <p>Semua user aktif sudah menjadi anggota group ini.</p>
+  {{ end }}
+</section>
+
+<section>
+  <h2>Hapus Group</h2>
+  <form method="post" action="/admin/groups/{{ $g.ID }}/delete" onsubmit="return confirm('Yakin ingin menghapus group ini? Anggota akan kehilangan akses database dari group ini.');">
+    <input type="hidden" name="_csrf" value="{{ .CSRFToken }}">
+    <button type="submit" class="btn-danger">Hapus Group</button>
+  </form>
+</section>
+
+<a href="/admin/groups" role="button" class="secondary">Kembali ke Daftar Group</a>
+{{ end }}
