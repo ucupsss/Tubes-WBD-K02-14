@@ -1,0 +1,40 @@
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Workspace Database</h1>
+    <p class="page-subtitle">Daftar target database PostgreSQL yang dapat Anda akses dan kelola.</p>
+  </div>
+</div>
+
+{{ if .Data.Databases }}
+<div class="db-grid">
+  {{ range .Data.Databases }}
+  <div class="db-card">
+    <div>
+      <div class="db-card-header">
+        <h2 class="db-card-title">{{ .Name }}</h2>
+        {{ if eq .Level.String "edit" }}
+          <span class="badge badge-edit">View + Edit</span>
+        {{ else }}
+          <span class="badge badge-view">View Only</span>
+        {{ end }}
+      </div>
+      <div class="db-card-meta">
+        <span>Target Database ID: <strong class="tabular-nums">#{{ .DatabaseID }}</strong></span>
+      </div>
+    </div>
+    <div class="db-card-actions">
+      <a href="/db/{{ .DatabaseID }}" role="button" class="btn-primary">Jelajahi Skema</a>
+      <a href="/db/{{ .DatabaseID }}/migrations" role="button" class="secondary outline">Migrasi</a>
+    </div>
+  </div>
+  {{ end }}
+</div>
+{{ else }}
+<div class="empty-state">
+  <div class="empty-state-icon">📂</div>
+  <h3>Belum Ada Akses Database</h3>
+  <p>Anda belum terdaftar dalam grup yang memiliki hak akses ke target database manapun. Silakan hubungi Platform Admin untuk mendapatkan akses.</p>
+</div>
+{{ end }}
+{{ end }}
