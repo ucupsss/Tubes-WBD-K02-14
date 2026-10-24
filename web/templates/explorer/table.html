@@ -1,0 +1,166 @@
+{{ define "content" }}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <a href="/">Workspace</a>
+  <span class="sep">/</span>
+  <a href="/db/{{ .Data.Database.ID }}">{{ .Data.Database.Name }}</a>
+  <span class="sep">/</span>
+  <span class="current">{{ .Data.Metadata.Schema }}.{{ .Data.Metadata.Table }}</span>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h1 class="page-title">{{ .Data.Metadata.Schema }}.{{ .Data.Metadata.Table }}</h1>
+    <p class="page-subtitle">Inspeksi skema, constraint, dan indeks PostgreSQL.</p>
+  </div>
+  <div class="header-actions">
+    <a href="/db/{{ .Data.Database.ID }}/tables/{{ .Data.Metadata.Schema }}/{{ .Data.Metadata.Table }}/data" role="button" class="btn-primary">
+      Jelajahi Data Tabel &rarr;
+    </a>
+  </div>
+</div>
+
+<div class="tab-nav">
+  <a href="/db/{{ .Data.Database.ID }}/tables/{{ .Data.Metadata.Schema }}/{{ .Data.Metadata.Table }}" class="tab-item active">
+    Metadata Skema
+  </a>
+  <a href="/db/{{ .Data.Database.ID }}/tables/{{ .Data.Metadata.Schema }}/{{ .Data.Metadata.Table }}/data" class="tab-item">
+    Jelajahi Data
+  </a>
+</div>
+
+<!-- Kolom -->
+<h2 style="font-size: 1.25rem; margin-top: 1.5rem; margin-bottom: 0.75rem;">Definisi Kolom</h2>
+<div class="data-table-container" style="margin-bottom: 2rem;">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Nama Kolom</th>
+          <th>Tipe Data</th>
+          <th>Nullable</th>
+          <th>Nilai Default</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Data.Metadata.Columns }}
+        <tr>
+          <td>
+            <strong class="code-font">{{ .Name }}</strong>
+            {{ if .IsPrimaryKey }}
+              <span class="badge badge-pk" style="margin-left: 0.5rem;">PK</span>
+            {{ end }}
+          </td>
+          <td><span class="code-font" style="color: var(--color-primary);">{{ .DataType }}</span></td>
+          <td>
+            {{ if .IsNullable }}
+              <span style="color: var(--color-text-muted);">NULL</span>
+            {{ else }}
+              <strong style="font-size: 0.8125rem;">NOT NULL</strong>
+            {{ end }}
+          </td>
+          <td>
+            {{ if .DefaultValue }}
+              <code class="code-font">{{ .DefaultValue }}</code>
+            {{ else }}
+              <span class="null-badge">-</span>
+            {{ end }}
+          </td>
+        </tr>
+        {{ else }}
+        <tr>
+          <td colspan="4">Tidak ada informasi kolom.</td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Constraints -->
+<h2 style="font-size: 1.25rem; margin-bottom: 0.75rem;">Constraints</h2>
+<div class="data-table-container" style="margin-bottom: 2rem;">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Nama Constraint</th>
+          <th>Tipe</th>
+          <th>Definisi SQL</th>
+          <th>Referensi Foreign Key</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Data.Metadata.Constraints }}
+        <tr>
+          <td><strong class="code-font">{{ .Name }}</strong></td>
+          <td>
+            {{ if eq .Type "PRIMARY KEY" }}
+              <span class="badge badge-pk">PRIMARY KEY</span>
+            {{ else if eq .Type "FOREIGN KEY" }}
+              <span class="badge badge-fk">FOREIGN KEY</span>
+            {{ else if eq .Type "UNIQUE" }}
+              <span class="badge badge-unique">UNIQUE</span>
+            {{ else }}
+              <span class="badge badge-check">{{ .Type }}</span>
+            {{ end }}
+          </td>
+          <td><code class="code-font">{{ .Definition }}</code></td>
+          <td>
+            {{ if .ForeignTable }}
+              <span class="code-font">&rarr; {{ .ForeignTable }}({{ .ForeignColumn }})</span>
+            {{ else }}
+              <span class="null-badge">-</span>
+            {{ end }}
+          </td>
+        </tr>
+        {{ else }}
+        <tr>
+          <td colspan="4" style="color: var(--color-text-muted); font-style: italic;">
+            Tidak ada constraint eksplisit pada tabel ini.
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Indeks -->
+<h2 style="font-size: 1.25rem; margin-bottom: 0.75rem;">Indeks Database</h2>
+<div class="data-table-container" style="margin-bottom: 2.5rem;">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Nama Indeks</th>
+          <th>Atribut</th>
+          <th>Definisi Query</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Data.Metadata.Indexes }}
+        <tr>
+          <td><strong class="code-font">{{ .Name }}</strong></td>
+          <td>
+            {{ if .IsPrimary }}
+              <span class="badge badge-pk">PRIMARY</span>
+            {{ else if .IsUnique }}
+              <span class="badge badge-unique">UNIQUE</span>
+            {{ else }}
+              <span class="badge badge-view">INDEX</span>
+            {{ end }}
+          </td>
+          <td><code class="code-font">{{ .Definition }}</code></td>
+        </tr>
+        {{ else }}
+        <tr>
+          <td colspan="3" style="color: var(--color-text-muted); font-style: italic;">
+            Tidak ada indeks tambahan pada tabel ini.
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{ end }}
