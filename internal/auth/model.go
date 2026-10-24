@@ -5,6 +5,7 @@ import (
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/session"
 )
 
 // User adalah baris tabel users. PasswordHash JANGAN pernah dirender atau di-log.
@@ -22,6 +23,17 @@ type User struct {
 // Principal mengubah User menjadi identitas yang dipakai authz.
 func (u User) Principal() authz.Principal {
 	return authz.Principal{UserID: u.ID, Username: u.Username, IsAdmin: u.IsAdmin}
+}
+
+// SessionUser mengubah User menjadi data yang dibutuhkan package session.
+func (u User) SessionUser() session.User {
+	return session.User{
+		ID:               u.ID,
+		Username:         u.Username,
+		IsAdmin:          u.IsAdmin,
+		IsActive:         u.IsActive,
+		PrivilegeVersion: u.PrivilegeVersion,
+	}
 }
 
 var (

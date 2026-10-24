@@ -9,6 +9,7 @@ import (
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/session"
 )
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{3,32}$`)
@@ -76,10 +77,21 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 	return u, nil
 }
 
-// GetByID dipakai session untuk memuat ulang status user (aktif, admin, privilege_version) tiap request.
 func (s *Service) GetByID(ctx context.Context, id int64) (User, error) {
 	return s.repo.GetByID(ctx, s.db, id)
 }
+
+// LookupUser mengimplementasi session.Users: memuat ulang status user (aktif, admin,
+// privilege_version) di setiap request.
+func (s *Service) LookupUser(ctx context.Context, userID int64) (session.User, error) {
+	u, err := s.repo.GetByID(ctx, s.db, userID)
+	if err != nil {
+		return session.User{}, err
+	}
+	return u.SessionUser(), nil
+}
+
+var _ session.Users = (*Service)(nil)
 
 // EnsureBootstrapAdmin membuat admin pertama dari env bila tabel users masih kosong.
 // Dipanggil sekali saat server start. created=false bila sudah ada user (env diabaikan).

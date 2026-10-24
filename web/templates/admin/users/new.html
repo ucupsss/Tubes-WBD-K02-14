@@ -1,0 +1,25 @@
+{{ define "content" }}
+<h1>Tambah User</h1>
+
+<form method="post" action="/admin/users" autocomplete="off">
+  <input type="hidden" name="_csrf" value="{{ .CSRFToken }}">
+
+  <label for="username">Username</label>
+  <input id="username" name="username" value="{{ .Data.Input.Username }}" required>
+  {{ with .Data.Errors.username }}<small class="field-error">{{ . }}</small>{{ end }}
+
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required>
+  {{ with .Data.Errors.password }}<small class="field-error">{{ . }}</small>{{ end }}
+
+  <label>
+    <input type="checkbox" name="is_admin" value="1" {{ if .Data.Input.IsAdmin }}checked{{ end }}>
+    Jadikan admin
+  </label>
+
+  <div class="form-actions">
+    <button type="submit">Simpan User</button>
+    <a href="/admin/users" role="button" class="secondary">Batal</a>
+  </div>
+</form>
+{{ end }}
