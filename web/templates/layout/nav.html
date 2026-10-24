@@ -1,0 +1,20 @@
+{{ define "nav" }}
+<nav class="container">
+  <ul>
+    <li><a href="/"><strong>DB Platform</strong></a></li>
+  </ul>
+  <ul>
+    {{ if .Principal }}
+    <li>{{ .Principal.Username }}</li>
+    <li>
+      <form method="post" action="/logout">
+        <input type="hidden" name="_csrf" value="{{ .CSRFToken }}">
+        <button type="submit" class="secondary outline">Keluar</button>
+      </form>
+    </li>
+    {{ else }}
+    <li><a href="/login">Masuk</a></li>
+    {{ end }}
+  </ul>
+</nav>
+{{ end }}

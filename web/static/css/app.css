@@ -21,3 +21,41 @@
 .btn-danger:hover {
   background-color: #b71c1c;
 }
+
+/* === migration === */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.badge-draft { background: #eceff1; color: #37474f; }
+.badge-running { background: #fff3e0; color: #e65100; }
+.badge-success { background: #e8f5e9; color: #1b5e20; }
+.badge-failed { background: #ffebee; color: #b71c1c; }
+
+.sql-block {
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9rem;
+}
+
+.migration-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.flash { padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; }
+.flash-success { background: #e8f5e9; color: #1b5e20; }
+.flash-error { background: #ffebee; color: #b71c1c; }

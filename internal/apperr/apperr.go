@@ -53,6 +53,10 @@ func Invalid(msg string) *Error {
 	return &Error{Kind: KindInvalid, Msg: msg}
 }
 
+func Unauthenticated(msg string) *Error {
+	return &Error{Kind: KindUnauthenticated, Msg: msg}
+}
+
 func InvalidFields(msg string, fields map[string]string) *Error {
 	return &Error{Kind: KindInvalid, Msg: msg, Fields: fields}
 }

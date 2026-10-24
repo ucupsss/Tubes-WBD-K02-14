@@ -1,0 +1,9 @@
+.env
+/bin/
+/tmp/
+*.exe
+*.test
+*.out
+coverage.*
+.DS_Store
+.idea/
