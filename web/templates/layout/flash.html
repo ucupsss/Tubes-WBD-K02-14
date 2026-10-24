@@ -1,0 +1,5 @@
+{{ define "flash" }}
+{{ with .Flash }}
+<div class="flash flash-{{ .Kind }}" role="status">{{ .Message }}</div>
+{{ end }}
+{{ end }}

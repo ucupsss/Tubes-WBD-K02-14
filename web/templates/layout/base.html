@@ -5,13 +5,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ .Title }} · DB Platform</title>
+  <link rel="stylesheet" href="/static/css/pico.min.css">
   <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
+  {{ template "nav" . }}
   <main class="container">
-    {{ with .Flash }}
-      <div class="flash flash-{{ .Kind }}">{{ .Message }}</div>
-    {{ end }}
+    {{ template "flash" . }}
     {{ template "content" . }}
   </main>
 </body>

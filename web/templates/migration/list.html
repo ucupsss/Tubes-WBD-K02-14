@@ -1,0 +1,37 @@
+{{ define "content" }}
+<div class="page-header">
+  <h1>Riwayat Migration</h1>
+  {{ if .Data.CanEdit }}
+  <a href="/db/{{ .Data.DatabaseID }}/migrations/new" role="button">Migration Baru</a>
+  {{ end }}
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Versi</th>
+      <th>Judul</th>
+      <th>Status</th>
+      <th>Pembuat</th>
+      <th>Pelaksana</th>
+      <th>Waktu</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{ range .Data.Migrations }}
+    <tr>
+      <td>{{ .VersionLabel }}</td>
+      <td><a href="/db/{{ .DatabaseID }}/migrations/{{ .ID }}">{{ .Title }}</a></td>
+      <td><span class="badge {{ statusBadge .Status }}">{{ .Status }}</span></td>
+      <td>{{ .CreatedByUsername }}</td>
+      <td>{{ if .ExecutedByUsername }}{{ .ExecutedByUsername }}{{ else }}—{{ end }}</td>
+      <td>{{ fmtTime .WhenLabel }}</td>
+    </tr>
+    {{ else }}
+    <tr>
+      <td colspan="6">Belum ada migration pada database ini.</td>
+    </tr>
+    {{ end }}
+  </tbody>
+</table>
+{{ end }}
