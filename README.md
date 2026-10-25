@@ -1,6 +1,6 @@
-# Database Management Platform
+# Tubes WBD
 
-Platform web untuk mengelola beberapa database PostgreSQL secara aman: login dan access control, menjelajahi schema dan data, lalu menyusun dan menjalankan migration di dalam transaction.
+Tubes WBD adalah platform manajemen database berbasis web untuk mengelola beberapa database PostgreSQL secara aman: login dan access control, menjelajahi schema dan data, lalu menyusun dan menjalankan migration di dalam transaction.
 
 Backend ditulis dengan Go, dan halaman dirender di server memakai `html/template`. Pada milestone ini, database target yang didukung hanya PostgreSQL.
 
@@ -76,6 +76,21 @@ Password koneksi target di seed hanya untuk demo lokal.
 | D18 | Menghapus group ikut menghapus keanggotaan dan grant group tersebut (`ON DELETE CASCADE`). |
 | D19 | Explorer menampilkan semua schema kecuali `pg_catalog`, `information_schema`, dan `_dbmp` (tabel internal platform). Data ditampilkan 50 baris per halaman (maksimal 200) dan diurutkan berdasarkan primary key bila ada. |
 | D20 | Analisis EXPLAIN hanya untuk migration `draft` atau `failed` dan butuh akses edit, karena `EXPLAIN ANALYZE` benar-benar mengeksekusi statement. Detailnya ada di bagian [Analisis EXPLAIN](#analisis-explain). |
+
+### Kode status di halaman error
+
+Halaman error menampilkan kode status, namanya, dan penjelasan singkat.
+
+| Kode | Nama | Kapan muncul |
+|------|------|--------------|
+| — (redirect ke `/login`) | Belum login | Membuka halaman terproteksi tanpa session yang berlaku (belum login, session idle/absolute habis, atau sudah dicabut). |
+| 400 | Permintaan Tidak Valid | Format permintaan salah. Kesalahan isian form ditampilkan langsung di form (422). |
+| 401 | — | Login gagal; form login ditampilkan lagi dengan pesan generik. |
+| 403 | Akses Ditolak | Sudah login tetapi tidak berhak (bukan admin, akses database kurang), atau token CSRF tidak valid. |
+| 404 | Tidak Ditemukan | Halaman, table, atau migration tidak ada (termasuk alamat URL yang salah ketik). |
+| 409 | Konflik | Aksi bertentangan dengan kondisi data, mis. nama sudah dipakai, migration `success` diubah, atau koneksi yang punya riwayat migration dihapus. |
+| 502 | Database Tidak Dapat Dihubungi | Database target mati atau menolak koneksi. |
+| 500 | Kesalahan Server | Kesalahan tak terduga; detailnya hanya dicatat di log server. |
 
 ### Parameter session
 

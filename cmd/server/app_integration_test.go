@@ -194,7 +194,9 @@ func TestApp_PublicRoutes(t *testing.T) {
 	if b.csrf == "" {
 		t.Fatal("form login harus berisi token CSRF")
 	}
-	expect(t, b.get("/halaman-yang-tidak-ada"), http.StatusNotFound, "")
+	nf := b.get("/halaman-yang-tidak-ada")
+	expect(t, nf, http.StatusNotFound, "")
+	expectBody(t, nf, `class="error-code">404<`, "Tidak Ditemukan", "<title>404 Tidak Ditemukan · Tubes WBD</title>", "<strong>Tubes WBD</strong>")
 
 	for _, p := range []string{"/", "/admin/users", "/admin/groups", "/admin/databases", "/db/1", "/db/1/migrations"} {
 		expect(t, b.get(p), http.StatusSeeOther, "/login")
@@ -242,7 +244,9 @@ func TestApp_SpecFlow(t *testing.T) {
 	bob := newBrowser(t, e.app)
 	expect(t, bob.login("bob", testutil.TestPassword), http.StatusSeeOther, "/")
 	expectBody(t, bob.get("/"), "target-test", fmt.Sprintf("/db/%d", dbID))
-	expect(t, bob.get("/admin/users"), http.StatusForbidden, "")
+	forbidden := bob.get("/admin/users")
+	expect(t, forbidden, http.StatusForbidden, "")
+	expectBody(t, forbidden, `class="error-code">403<`, "Akses Ditolak", "Hubungi Platform Admin")
 	expect(t, bob.get("/db/999999"), http.StatusForbidden, "") // D15: ID database tak ada tidak dibedakan dari tak berhak
 
 	expectBody(t, bob.get(fmt.Sprintf("/db/%d", dbID)), "customers")

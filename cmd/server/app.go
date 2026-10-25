@@ -10,6 +10,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/groups"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/users"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/clock"
@@ -67,6 +68,10 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("GET /static/", http.FileServerFS(webFS))
+	// Path yang tidak cocok dengan route mana pun memakai halaman error yang sama (bukan teks bawaan ServeMux).
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		httpx.HandleError(w, r, views, apperr.NotFound("Halaman tidak ditemukan"))
+	})
 
 	auth.RegisterRoutes(mux, auth.NewHandler(authSvc, sessMgr, views, logger), mw)
 	users.RegisterRoutes(mux, users.NewHandler(users.NewService(pool, users.NewPgRepo(), authSvc, sessMgr), views), mw)
