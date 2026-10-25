@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Database Management Platform · Custom Styles (Impeccable Operate Mode)
+   Tubes WBD · Custom Styles (Impeccable Operate Mode)
    ========================================================================== */
 
 :root {
@@ -428,3 +428,8 @@ h1, h2, h3, h4 {
 .plan-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
 .plan-metrics, .plan-cond { font-size: 0.82rem; color: #455a64; font-variant-numeric: tabular-nums; }
 .plan-slow > .plan-head strong { color: #b71c1c; }
+
+/* Halaman error: kode status besar + nama status */
+.error-page .error-code { font-size: 3rem; font-weight: 700; line-height: 1; margin: 0; color: #78909c; font-variant-numeric: tabular-nums; }
+.error-page h1 { margin-top: 0.25rem; }
+.error-page .error-hint { color: #546e7a; }

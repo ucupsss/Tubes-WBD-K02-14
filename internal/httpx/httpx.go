@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -60,29 +61,37 @@ func HandleError(w http.ResponseWriter, r *http.Request, v *view.View, err error
 	}
 
 	if v != nil && v.HasTemplates() {
-		title := "Terjadi kesalahan"
-		switch status {
-		case http.StatusBadRequest:
-			title = "Permintaan tidak valid"
-		case http.StatusForbidden:
-			title = "Akses ditolak"
-		case http.StatusNotFound:
-			title = "Tidak ditemukan"
-		case http.StatusConflict:
-			title = "Konflik"
-		case http.StatusBadGateway:
-			title = "Database tidak dapat dihubungi"
-		}
+		label, hint := statusText(status)
 		v.Render(w, r, status, "errors/error.html", view.PageData{
-			Title: title,
+			Title: fmt.Sprintf("%d %s", status, label),
 			Data: map[string]any{
 				"Status":  status,
+				"Label":   label,
 				"Message": msg,
+				"Hint":    hint,
 			},
 		})
 		return
 	}
 	http.Error(w, msg, status)
+}
+
+// statusText returns the status name and a short explanation of what it means for the user.
+func statusText(status int) (label, hint string) {
+	switch status {
+	case http.StatusBadRequest:
+		return "Permintaan Tidak Valid", "Data yang dikirim tidak sesuai format. Periksa kembali isian Anda, lalu coba lagi."
+	case http.StatusForbidden:
+		return "Akses Ditolak", "Anda sudah login, tetapi tidak memiliki hak akses untuk halaman atau aksi ini. Hubungi Platform Admin bila Anda membutuhkan akses."
+	case http.StatusNotFound:
+		return "Tidak Ditemukan", "Halaman atau data yang diminta tidak ada. Periksa kembali alamat URL, misalnya ada karakter berlebih di akhir alamat."
+	case http.StatusConflict:
+		return "Konflik", "Aksi tidak dapat dilakukan karena bertentangan dengan kondisi data saat ini."
+	case http.StatusBadGateway:
+		return "Database Tidak Dapat Dihubungi", "Platform tidak dapat terhubung ke database target. Pastikan database tersebut menyala, lalu coba lagi."
+	default:
+		return "Kesalahan Server", "Terjadi kesalahan di sisi server. Silakan coba lagi beberapa saat lagi."
+	}
 }
 
 func messageOr(appErr *apperr.Error, fallback string) string {
