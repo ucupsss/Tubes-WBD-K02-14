@@ -1,149 +1,190 @@
 # Database Management Platform
 
-A web platform for managing several PostgreSQL databases safely: login and access control, browsing schema and data, then writing and running migrations inside a transaction.
+Platform web untuk mengelola beberapa database PostgreSQL secara aman: login dan access control, menjelajahi schema dan data, lalu menyusun dan menjalankan migration di dalam transaction.
 
-The backend is Go with server-rendered `html/template` pages. For this milestone the only target database is PostgreSQL.
+Backend ditulis dengan Go, dan halaman dirender di server memakai `html/template`. Pada milestone ini, database target yang didukung hanya PostgreSQL.
 
-## Running
+Alur minimum yang didukung:
 
-Requires Go 1.24+, Docker Desktop, and `make` (Git Bash). Leave the ports below free of a local Postgres install.
+```
+Login → Access Control → Pilih Database → Lihat Schema/Data
+      → Buat Migration → Jalankan → Commit/Rollback
+      → Riwayat Migration diperbarui
+```
+
+## Menjalankan
+
+Butuh Go 1.24+, Docker Desktop, dan `make` (Git Bash). Pastikan port di bawah tidak sedang dipakai Postgres lokal atau container lain.
 
 ```bash
 cp .env.example .env
-# set APP_SECRET_KEY (openssl rand -base64 32) and BOOTSTRAP_ADMIN_PASSWORD
+# isi APP_SECRET_KEY (openssl rand -base64 32) dan BOOTSTRAP_ADMIN_PASSWORD
 make up
 make run          # http://localhost:8080
-make seed         # demo users, groups, connections, and grants
+make seed         # user, group, koneksi, dan grant untuk demo
 ```
 
-`make run` applies platform migrations automatically. If a new migration file has a lower number than one already applied, run `make db-reset`.
+`make run` menjalankan migrasi platform secara otomatis. Jika ada file migrasi baru yang nomornya lebih kecil dari yang sudah diterapkan, jalankan `make db-reset`.
 
-| Command                 | Purpose                                                              |
-|-------------------------|----------------------------------------------------------------------|
-| `make up` / `make down` | Start / stop Postgres                                                |
-| `make db-reset`         | Drop volumes and start clean                                         |
-| `make test`             | Unit tests                                                           |
-| `make test-integration` | Unit and integration tests (needs `make up` and `TEST_DATABASE_URL`) |
-| `make check`            | `lint` plus integration tests. Must pass before opening a PR         |
+| Perintah                | Fungsi                                                                    |
+|-------------------------|---------------------------------------------------------------------------|
+| `make up` / `make down` | Menyalakan / mematikan Postgres                                           |
+| `make db-reset`         | Menghapus volume lalu menyalakan ulang dari kosong                        |
+| `make test`             | Unit test                                                                 |
+| `make test-integration` | Unit test + integration test (butuh `make up` dan `TEST_DATABASE_URL`)    |
+| `make check`            | `lint` + integration test. Wajib lolos sebelum membuka PR                 |
 
-Local ports: app `8080`, platform-db `5432`, target-db-1 `5433`, target-db-2 `5434`, test-db `5440`.
+Port lokal: aplikasi `8080`, platform-db `5432`, target-db-1 `5433`, target-db-2 `5434`, test-db `5440`.
 
-## Demo accounts
+## Akun demo
 
-On the first `make run`, while the user table is empty, the admin is created from `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD`.
+Saat `make run` pertama kali dan tabel user masih kosong, admin dibuat dari `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD`.
 
-`make seed` adds:
+`make seed` menambahkan:
 
-| User  | Password      | Group           |
-|-------|---------------|-----------------|
-| alice | `password123` | dev             |
-| bob   | `password123` | dev and analyst |
-| carol | `password123` | analyst         |
+| User  | Password      | Group              |
+|-------|---------------|--------------------|
+| alice | `password123` | dev                |
+| bob   | `password123` | dev dan analyst    |
+| carol | `password123` | analyst            |
 
-Connections `target-db-1` (port 5433, database `target1`) and `target-db-2` (port 5434, database `target2`) use user/password `target`. Grants: `dev` has edit on db1; `analyst` has view on db1 and db2. Bob is in both groups, so Bob's effective access to db1 is edit.
+Koneksi `target-db-1` (port 5433, database `target1`) dan `target-db-2` (port 5434, database `target2`) memakai user/password `target`. Grant: `dev` punya akses edit ke db1; `analyst` punya akses view ke db1 dan db2. Bob ada di kedua group, sehingga akses efektif Bob ke db1 adalah edit.
 
-The target connection password in the seed is for the local demo only.
+Password koneksi target di seed hanya untuk demo lokal.
 
-## Design decisions
+## Keputusan desain
 
-| #   | Decision                                                                                                                                                                                        |
-|-----|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| D1  | Effective access is the highest level from all of the user's groups on that database (`edit` > `view` > none).                                                                                  |
-| D2  | Platform Admin does not automatically get database access. The admin must belong to a group that has a grant.                                                                                   |
-| D3  | Session: 30 minute idle, 8 hour absolute, 15 minute rotation, 30 second grace. All of these can be changed through env.                                                                         |
-| D4  | The session token is 32 random bytes. The database stores only its SHA-256 hash.                                                                                                                |
-| D5  | A request that presents the previous token during the grace period is served, and that token is not rotated again.                                                                              |
-| D6  | A privilege increase (becoming admin, joining a group, or a grant rising) increments `privilege_version`. The session rotates on the next request.                                              |
-| D7  | Deactivating a user or removing admin rights revokes all of that user's sessions. Leaving a group or losing a grant takes effect immediately because authz reads the database on every request. |
-| D8  | Users are not deleted permanently. Deactivation sets `is_active = false`.                                                                                                                       |
-| D9  | A connection that already has migration history cannot be deleted (`ON DELETE RESTRICT`).                                                                                                       |
-| D10 | The version number is assigned on successful execution: `max(version) + 1` per database. Drafts and failures have no version yet. Every attempt is recorded in `migration_runs`.                |
-| D11 | A `success` migration cannot be edited, deleted, or run again. A draft can be edited, deleted, and run. A `failed` migration can be edited and run again, and cannot be deleted.                |
-| D12 | Executions for one database are serialized with `SELECT ... FOR UPDATE` on the `db_connections` row.                                                                                            |
-| D13 | SQL containing `BEGIN` / `COMMIT` / `ROLLBACK` / `SAVEPOINT`, `CREATE INDEX CONCURRENTLY`, `VACUUM`, or `CREATE DATABASE` is rejected. The same words inside a string or a comment are allowed. |
-| D14 | The database explorer is read-only: a `READ ONLY` transaction, `statement_timeout`, quoted identifiers, and paginated data.                                                                     |
-| D15 | A request with no login is redirected to `/login`. A logged-in user without access gets 403.                                                                                                    |
+| #   | Keputusan |
+|-----|-----------|
+| D1  | Akses efektif adalah level **tertinggi** dari semua group user pada database tersebut (`edit` > `view` > tidak ada). |
+| D2  | Platform Admin **tidak** otomatis punya akses ke database target. Admin hanya mengelola user, group, koneksi, dan grant; untuk membuka database, admin harus menjadi anggota group yang punya grant. |
+| D3  | Session: idle timeout 30 menit, absolute expiration 8 jam, rotasi tiap 15 menit, grace period 30 detik. Semuanya bisa diubah lewat env. Waktu aktivitas terakhir (`last_seen_at`) diperbarui paling sering sekali per menit, jadi idle timeout berpresisi ±1 menit. |
+| D4  | Session identifier adalah 32 byte acak (`crypto/rand`). Database hanya menyimpan hash SHA-256-nya. |
+| D5  | Token lama yang dikirim selama grace period tetap dilayani, dan tidak dirotasi lagi. Setelah grace period habis, token lama ditolak. |
+| D6  | Kenaikan privilege (dijadikan admin, masuk group, atau grant naik) menaikkan `privilege_version`, sehingga session dirotasi pada request berikutnya. |
+| D7  | Menonaktifkan user, mencabut status admin, atau reset password oleh admin mencabut semua session user tersebut. Keluar dari group atau kehilangan grant langsung berlaku karena hak akses dibaca ulang dari database di setiap request. |
+| D8  | User tidak pernah dihapus permanen. Penonaktifan mengisi `is_active = false`. Admin tidak bisa mencabut status admin atau menonaktifkan akunnya sendiri. |
+| D9  | Koneksi yang sudah punya riwayat migration tidak bisa dihapus (`ON DELETE RESTRICT`). |
+| D10 | Nomor versi diberikan saat eksekusi berhasil: `max(version) + 1` per database. Draft dan migration gagal belum punya versi. Setiap percobaan dicatat di `migration_runs`. |
+| D11 | Migration `success` tidak bisa diubah, dihapus, atau dijalankan ulang. Draft bisa diubah, dihapus, dan dijalankan. Migration `failed` bisa diubah dan dijalankan ulang, tetapi tidak bisa dihapus. |
+| D12 | Eksekusi untuk satu database diserialisasi dengan `SELECT ... FOR UPDATE` pada baris `db_connections`. |
+| D13 | SQL yang berisi `BEGIN` / `COMMIT` / `ROLLBACK` / `SAVEPOINT`, `CREATE INDEX CONCURRENTLY`, `VACUUM`, atau `CREATE DATABASE` ditolak. Kata yang sama di dalam string atau komentar tetap diperbolehkan. |
+| D14 | Database explorer hanya membaca: memakai transaction `READ ONLY`, `statement_timeout`, identifier yang di-quote, dan data berpaginasi. |
+| D15 | Request tanpa login diarahkan ke `/login`. User yang sudah login tetapi tidak berhak mendapat 403, termasuk untuk ID database yang tidak ada (supaya keberadaan database tidak bocor). Target database yang tidak bisa dihubungi menghasilkan 502 dengan pesan tanpa password/DSN. |
+| D16 | Username 3–32 karakter (huruf, angka, `.`, `_`, `-`). Password minimal 8 karakter dan maksimal 72 byte (batas bcrypt; byte sesudahnya ditolak, bukan dipotong diam-diam). |
+| D17 | Satu user boleh punya beberapa session sekaligus (mis. dua perangkat). Login ulang di browser yang sama mencabut session lama di browser itu. |
+| D18 | Menghapus group ikut menghapus keanggotaan dan grant group tersebut (`ON DELETE CASCADE`). |
+| D19 | Explorer menampilkan semua schema kecuali `pg_catalog`, `information_schema`, dan `_dbmp` (tabel internal platform). Data ditampilkan 50 baris per halaman (maksimal 200) dan diurutkan berdasarkan primary key bila ada. |
+| D20 | Analisis EXPLAIN hanya untuk migration `draft` atau `failed` dan butuh akses edit, karena `EXPLAIN ANALYZE` benar-benar mengeksekusi statement. Detailnya ada di bagian [Analisis EXPLAIN](#analisis-explain). |
 
-### Session parameters
+### Parameter session
 
-| Env                         | Default |
-|-----------------------------|---------|
-| `SESSION_IDLE_TIMEOUT`      | `30m`   |
-| `SESSION_ABSOLUTE_TIMEOUT`  | `8h`    |
-| `SESSION_ROTATION_INTERVAL` | `15m`   |
-| `SESSION_GRACE_PERIOD`      | `30s`   |
+| Env                         | Default | Arti |
+|-----------------------------|---------|------|
+| `SESSION_IDLE_TIMEOUT`      | `30m`   | Session berakhir bila tidak ada request selama waktu ini. |
+| `SESSION_ABSOLUTE_TIMEOUT`  | `8h`    | Umur maksimum session sejak login. Tidak diperpanjang oleh aktivitas maupun rotasi. |
+| `SESSION_ROTATION_INTERVAL` | `15m`   | Session identifier diganti secara berkala (selain saat login dan saat privilege naik). |
+| `SESSION_GRACE_PERIOD`      | `30s`   | Identifier lama masih diterima sebentar setelah rotasi, untuk request yang berjalan bersamaan. |
 
-Session cookie: `dbmp_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `APP_ENV=production`).
+Cookie session: `dbmp_session` (`HttpOnly`, `SameSite=Lax`, `Secure` bila `APP_ENV=production`, tanpa `Expires`). Nama cookie tetap; nilainya diganti setiap rotasi. Logout (`POST /logout`) menonaktifkan session di backend, bukan hanya menghapus cookie.
 
-### Permission matrix
+Password di-hash dengan bcrypt (cost 12). Login yang gagal selalu memberi pesan yang sama. Password, session identifier, dan token CSRF tidak pernah muncul di URL, response, maupun log; logger hanya mencatat method, path, status, dan durasi.
 
-Platform Admin is not a database access level. `/db/...` routes follow the group grant.
+### CSRF
 
-| Route                                           | Minimum access   |
-|-------------------------------------------------|------------------|
-| `GET/POST /login`, `POST /logout`               | public / session |
-| `GET /`                                         | login            |
-| `/admin/users`, `/admin/groups`                 | platform admin   |
-| `/admin/databases`, `/admin/groups/{id}/access` | platform admin   |
-| `GET /db/{dbID}/...` (schema and data)          | view             |
-| `GET /db/{dbID}/migrations`, `GET .../{id}`     | view             |
-| create, edit, execute, delete a draft, analyze  | edit             |
+Semua `POST/PUT/PATCH/DELETE` wajib membawa token, lewat hidden field `_csrf` atau header `X-CSRF-Token`. Token yang kosong atau salah menghasilkan 403.
 
-Every state-changing POST carries a CSRF token. Hiding a button in the UI is not authorization.
+- Setelah login, token berasal dari session (`sessions.csrf_token`) dan dibandingkan secara constant-time.
+- Form login (belum ada session) memakai cookie double-submit `dbmp_csrf_pre`, ditambah pengecekan bahwa header `Origin`/`Referer` berasal dari host yang sama.
+
+### Matriks hak akses
+
+Aturan aksi hanya didefinisikan di satu tempat: `internal/authz/policy.go`. Aksi yang tidak terdaftar selalu ditolak. Route `/db/...` mengikuti grant group.
+
+| Route                                                   | Akses minimum    |
+|---------------------------------------------------------|------------------|
+| `GET/POST /login`                                       | publik           |
+| `POST /logout`, `GET /` (dashboard)                     | login            |
+| `/admin/users`, `/admin/groups`                         | platform admin   |
+| `/admin/databases`, `/admin/groups/{id}/access`         | platform admin   |
+| `GET /db/{dbID}/...` (schema dan data)                  | view             |
+| `GET /db/{dbID}/migrations`, `GET .../{id}`             | view             |
+| buat, ubah, jalankan, hapus draft migration             | edit             |
+| analisis EXPLAIN (`POST .../migrations/{id}/explain`)   | edit             |
+
+Menyembunyikan tombol di antarmuka bukan otorisasi; setiap aksi dicek ulang di backend.
 
 ## Migration
 
-History is linear per database: versions 1, 2, 3, ... with no gaps. A new version is written only when the whole script commits.
+Riwayat migration linear per database: versi 1, 2, 3, ... tanpa celah. Versi baru hanya ditulis bila seluruh script berhasil di-commit.
 
-Execution:
+Langkah eksekusi:
 
-1. Lock the connection row in the platform database.
-2. Reject the attempt when the status is not `draft` or `failed`, or when the SQL breaks D13.
-3. Run the script in a target transaction with a 60 second `statement_timeout` and a 5 second `lock_timeout`. The simple query protocol is used so one field can hold several statements.
-4. In that same transaction, record the version in `_dbmp.applied_migrations` on the target database.
-5. Commit the target, then write the version, status, and one `migration_runs` row on the platform. If any statement fails, the target transaction rolls back (earlier statements disappear too) and the status becomes `failed`.
+1. Mengunci baris koneksi di platform database.
+2. Menolak percobaan bila status bukan `draft` atau `failed`, atau bila SQL melanggar D13.
+3. Menjalankan script di dalam satu transaction pada database target, dengan `statement_timeout` 60 detik dan `lock_timeout` 5 detik. Simple query protocol dipakai supaya satu field bisa berisi beberapa statement.
+4. Di transaction yang sama, mencatat versi di tabel `_dbmp.applied_migrations` pada database target.
+5. Commit di target, lalu menulis versi, status, pelaksana, waktu, dan satu baris `migration_runs` di platform. Bila ada statement yang gagal, transaction target di-rollback (statement sebelumnya ikut hilang) dan status menjadi `failed`.
 
-If the process dies before the platform commit, the status stays `draft` or `failed` because the `running` change was never committed. If the target has already committed and the platform update fails, the `_dbmp.applied_migrations` row remains and can be used for reconciliation. The target side is atomic on purpose.
+Bila proses mati sebelum commit di platform, status tetap `draft` atau `failed` karena perubahan ke `running` tidak pernah di-commit. Bila target sudah commit tetapi update platform gagal, baris di `_dbmp.applied_migrations` tetap ada dan bisa dipakai untuk rekonsiliasi.
 
-Postgres errors from the user's own SQL (for example, a relation already exists) are shown. A connection-failure message does not include the password or the DSN.
+Error Postgres dari SQL milik user (misalnya relation sudah ada) ditampilkan apa adanya. Pesan kegagalan koneksi tidak memuat password maupun DSN.
 
-The **Analisis** button on a draft or failed migration sends `POST /db/{dbID}/migrations/{id}/explain`, with `analyze=1` when the "Dengan ANALYZE" checkbox is checked. The route and the engine live in package `explain`. The detail page includes the `explain_plan` partial only when plan data is actually sent, so the page still renders before that partial exists.
+## Analisis EXPLAIN
 
-EXPLAIN limits: `nextval()` is not rolled back, and `EXPLAIN ANALYZE` holds locks while it runs. That is why this action requires edit access.
+Tombol **Analisis** di halaman detail migration (draft atau gagal) menjalankan `EXPLAIN` terhadap SQL migration sebelum dieksekusi. Centang "Dengan ANALYZE" untuk `EXPLAIN ANALYZE`.
 
-## Layout
+Cara kerja:
+
+1. SQL divalidasi dengan aturan yang sama seperti saat menyimpan migration (D13), lalu dipecah per statement.
+2. Semua statement dijalankan berurutan di **satu transaction yang selalu di-rollback**, dengan `statement_timeout` 30 detik dan `lock_timeout` 5 detik.
+3. Statement DML (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `WITH`, `VALUES`) di-`EXPLAIN (FORMAT JSON)`, atau `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` bila ANALYZE dicentang.
+4. Statement DDL tidak punya execution plan. Statement itu dijalankan sementara supaya statement berikutnya bisa direncanakan (misalnya `CREATE TABLE t` lalu `INSERT INTO t`).
+5. Setiap statement dibungkus `SAVEPOINT`, sehingga error satu statement ditampilkan pada statement itu dan statement lain tetap dianalisis.
+
+Yang ditampilkan per statement: jenis scan dan index yang dipakai, join strategy, estimated cost, estimasi jumlah baris, serta (dengan ANALYZE) waktu aktual, jumlah baris aktual, loops, dan waktu eksekusi. Plan ditampilkan sebagai pohon node.
+
+Penanda pada node (hanya dengan ANALYZE):
+
+- **lambat**: waktu eksklusif node (tanpa anak, dikali loops) ≥ 30% dari waktu eksekusi statement dan minimal 1 ms;
+- **estimasi meleset**: jumlah baris aktual berbeda ≥ 10× dari estimasi planner (lebih besar maupun lebih kecil).
+
+Batasan: `nextval()` pada sequence tidak ikut di-rollback, dan `EXPLAIN ANALYZE` memegang lock selama berjalan. Karena itu analisis membutuhkan akses edit. Status migration tidak berubah dan analisis tidak dicatat sebagai percobaan eksekusi.
+
+## Pengujian
+
+- **Unit test** (`make test`) menguji setiap modul secara terisolasi dengan stub/mock: policy dan akses efektif, keputusan rotasi/idle/absolute dengan jam palsu, CSRF, validasi, SQL splitter, enkripsi kredensial, dan handler.
+- **Integration test** (`make test-integration`, build tag `integration`) memakai Postgres sungguhan. Setiap test membuat database `test_<acak>` sendiri lewat `testutil.NewPlatformDB` / `NewTargetDB` dan menghapusnya setelah selesai.
+  - `cmd/server`: alur minimum di atas dijalankan dari awal sampai akhir lewat router produksi dan template HTML asli. Login, membuat koneksi, group, dan grant, lalu melihat schema/data, membuat dan menjalankan migration (commit dan rollback), memeriksa riwayat, mencabut akses, dan logout.
+  - Modul lain menguji kasus berhasil, gagal, dan ditolak untuk session (grace, absolute, idle, rotasi paralel), login dan CSRF, user/group, koneksi dan grant, explorer (paginasi, table tidak ada, nama table berisi SQL injection, target mati), migration, serta analisis EXPLAIN (filter ber-index menghasilkan Index Scan, tanpa index menghasilkan Seq Scan; `CREATE TABLE` + `INSERT` berhasil dianalisis dan table tidak tersisa; error per statement; user view ditolak).
+
+## Struktur
 
 ```
-cmd/server          wiring
-cmd/seed            demo data
-internal/auth       login and passwords             (A)
-internal/session    session                         (A)
-internal/csrf       CSRF                            (A)
-internal/authz      policy and effective access     (A)
-internal/admin      users, groups, databases, access
-internal/dbconn     connections, encryption, pool   (B)
-internal/explorer   schema browser                  (B)
-internal/explain    EXPLAIN                         (B)
-internal/migration  editor, execution, history      (C)
+cmd/server          wiring aplikasi (app.go) dan entry point
+cmd/seed            data demo
+internal/auth       login, password, bootstrap admin
+internal/session    session: idle, absolute, rotasi, grace
+internal/csrf       proteksi CSRF
+internal/authz      policy dan akses efektif
+internal/admin      user, group, koneksi database, grant akses
+internal/dbconn     koneksi, enkripsi kredensial, pool
+internal/explorer   viewer schema dan data
+internal/migration  editor, eksekusi, riwayat
+internal/explain    analisis EXPLAIN / EXPLAIN ANALYZE
 internal/config platformdb apperr clock httpx view testutil
 db/platform_migrations
 web/templates web/static
 ```
 
-## Work split
+## Pembagian kerja
 
-| Letter | NIM      | Name                  | Responsibility                                                                                                      |
-|--------|----------|-----------------------|---------------------------------------------------------------------------------------------------------------------|
-| A      | 13524XXX |                       | identity, session, CSRF, authz, users, and groups.                                                                  |
-| B      | 13524XXX |                       | database connections, grants, the schema/data explorer, and the EXPLAIN engine.                                     |
-| C      | 13524011 | Muhammad Iqbal Raihan | platform infra, shared templates, test helpers, and migration (including the SQL splitter and the Analisis button). |
+| NIM      | Nama                     | Tanggung jawab |
+|----------|--------------------------|----------------|
+| 13524014 | Yusuf Faishal Listyardi  | Identitas dan keamanan: login, session, CSRF, authorization (policy dan akses efektif), serta pengelolaan user dan group. |
+| 13524002 | Daniel Anindito Nugroho  | Pengelolaan koneksi database, grant akses group ke database, viewer schema dan data, serta engine analisis EXPLAIN. |
+| 13524011 | Muhammad Iqbal Raihan    | Infrastruktur platform, template bersama, helper test, serta migration (termasuk SQL splitter dan tombol Analisis). |
 
-The MySQL/MariaDB bonus is out of scope: MySQL DDL does an implicit commit, so the migration rollback guarantee would not hold. Schema diff is not part of this milestone.
+## Di luar cakupan
 
-### Session (A)
-
-Session middleware (idle, absolute, rotation, grace) and CSRF will land in packages `session` and `csrf`. `main` already has a place to mount them. Until they are mounted, protected routes reject a request that has no principal.
-
-### Explorer and EXPLAIN (B)
-
-The schema/data browser and the plan parser will land in packages `explorer` and `explain`. The statement-splitting contract is `migration.SplitStatements`. The plan partial expected by the detail page is the `explain_plan` template.
+Dari spesifikasi bonus, yang diimplementasikan adalah analisis EXPLAIN. Dukungan MySQL/MariaDB serta schema diff dan migration generation belum diimplementasikan. Untuk MySQL/MariaDB, DDL melakukan implicit commit sehingga jaminan rollback migration tidak bisa dipenuhi.

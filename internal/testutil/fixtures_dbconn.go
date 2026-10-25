@@ -1,46 +1,62 @@
 package testutil
 
 import (
+	"bytes"
 	"context"
+	"net/url"
+	"os"
+	"strconv"
 	"testing"
 
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 )
 
-// TestSecretKey adalah kunci enkripsi 32-byte untuk testing.
-var TestSecretKey = []byte("12345678901234567890123456789012")
+// SecretKey is the APP_SECRET_KEY used by fixtures and NewServer to encrypt connection passwords.
+var SecretKey = bytes.Repeat([]byte{0x2a}, 32)
 
-// CreateConnection membuat koneksi database target baru di platform DB dan mengembalikan ID-nya.
+// TestSecretKey is an alias for SecretKey.
+var TestSecretKey = SecretKey
+
+// TargetInput returns connection settings for a database on the TEST_DATABASE_URL server.
+func TargetInput(t *testing.T, name, targetDBName string) databases.CreateInput {
+	t.Helper()
+	RequireEnv(t)
+	u, err := url.Parse(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
+	}
+	port := 5432
+	if p := u.Port(); p != "" {
+		if port, err = strconv.Atoi(p); err != nil {
+			t.Fatalf("TEST_DATABASE_URL port: %v", err)
+		}
+	}
+	pw, _ := u.User.Password()
+	return databases.CreateInput{
+		Name: name, Host: u.Hostname(), Port: port, DBName: targetDBName,
+		Username: u.User.Username(), Password: pw, SSLMode: "disable",
+	}
+}
+
+// CreateConnection registers targetDBName (from NewTargetDB) as a connection and returns its id.
 func CreateConnection(t *testing.T, db platformdb.DBTX, targetDBName string) int64 {
 	t.Helper()
-	encPass, err := dbconn.Encrypt([]byte("postgres"), TestSecretKey)
+	in := TargetInput(t, "conn-"+targetDBName, targetDBName)
+	id, err := databases.NewService(db, databases.NewPgRepo(), nil, SecretKey).Create(context.Background(), in)
 	if err != nil {
-		t.Fatalf("testutil.CreateConnection: encrypt: %v", err)
-	}
-
-	const q = `
-		INSERT INTO db_connections (name, host, port, db_name, username, password_enc, sslmode)
-		VALUES ($1, 'localhost', 5432, $1, 'postgres', $2, 'disable')
-		RETURNING id`
-
-	var id int64
-	if err := db.QueryRow(context.Background(), q, targetDBName, encPass).Scan(&id); err != nil {
-		t.Fatalf("testutil.CreateConnection(%q): %v", targetDBName, err)
+		t.Fatalf("CreateConnection(%q): %v", targetDBName, err)
 	}
 	return id
 }
 
-// Grant memberikan akses group ke target database dengan level tertentu ('view' atau 'edit').
+// Grant gives groupID the level ("view" or "edit") on dbID.
 func Grant(t *testing.T, db platformdb.DBTX, groupID, dbID int64, level string) {
 	t.Helper()
 	const q = `
-		INSERT INTO group_db_access (group_id, database_id, level, granted_at)
-		VALUES ($1, $2, $3, now())
-		ON CONFLICT (group_id, database_id)
-		DO UPDATE SET level = $3, granted_at = now()`
-
+		INSERT INTO group_db_access (group_id, database_id, level) VALUES ($1, $2, $3)
+		ON CONFLICT (group_id, database_id) DO UPDATE SET level = EXCLUDED.level`
 	if _, err := db.Exec(context.Background(), q, groupID, dbID, level); err != nil {
-		t.Fatalf("testutil.Grant(group=%d, db=%d, level=%q): %v", groupID, dbID, level, err)
+		t.Fatalf("Grant(%d, %d, %s): %v", groupID, dbID, level, err)
 	}
 }

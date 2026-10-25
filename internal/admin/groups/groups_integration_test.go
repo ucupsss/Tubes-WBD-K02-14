@@ -94,12 +94,20 @@ func TestPg_Members(t *testing.T) {
 	}
 
 	testutil.AddMember(t, pool, g, bob)
+	targetName, _ := testutil.NewTargetDB(t, "")
+	testutil.Grant(t, pool, g, testutil.CreateConnection(t, pool, targetName), "edit")
 	if err := repo.Delete(ctx, pool, g); err != nil {
 		t.Fatal(err)
 	}
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM group_members WHERE group_id = $1`, g).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("keanggotaan harus ikut terhapus (cascade), sisa %d", n)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM group_db_access WHERE group_id = $1`, g).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("grant group harus ikut terhapus (cascade), sisa %d", n)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO group_db_access (group_id, database_id, level) VALUES (999999, 1, 'view')`); err == nil {
+		t.Fatal("grant untuk group yang tidak ada harus ditolak FK")
 	}
 }
 

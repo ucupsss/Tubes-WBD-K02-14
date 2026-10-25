@@ -5,6 +5,11 @@
   </ul>
   <ul>
     {{ if .Principal }}
+    {{ if .Principal.IsAdmin }}
+    <li><a href="/admin/users">User</a></li>
+    <li><a href="/admin/groups">Group</a></li>
+    <li><a href="/admin/databases">Koneksi Database</a></li>
+    {{ end }}
     <li>{{ .Principal.Username }}</li>
     <li>
       <form method="post" action="/logout">
