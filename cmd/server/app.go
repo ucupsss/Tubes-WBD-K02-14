@@ -16,6 +16,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/config"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/csrf"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/explain"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/explorer"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
@@ -73,7 +74,9 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 	databases.RegisterRoutes(mux, databases.NewHandler(databases.NewService(pool, dbRepo, conns, cfg.SecretKey), views), mw)
 	access.RegisterRoutes(mux, access.NewHandler(access.NewService(pool, access.NewPgRepo(), bumper), views), mw)
 	explorer.RegisterRoutes(mux, explorer.NewHandler(explorer.NewService(conns, az, explorer.NewPgRepo(), getter), views), mw)
-	migration.RegisterRoutes(mux, migration.NewHandler(migration.NewService(pool, migration.NewPgRepo(), conns, clk), views, az), mw)
+	migSvc := migration.NewService(pool, migration.NewPgRepo(), conns, clk)
+	migration.RegisterRoutes(mux, migration.NewHandler(migSvc, views, az), mw)
+	explain.RegisterRoutes(mux, explain.NewHandler(migSvc, explain.NewAnalyzer(conns), views), mw)
 
 	handler := httpx.Chain(mux,
 		httpx.Logger(logger),

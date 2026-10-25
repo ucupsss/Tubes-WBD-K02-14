@@ -413,3 +413,18 @@ h1, h2, h3, h4 {
 .flash { padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; }
 .flash-success { background: #e8f5e9; color: #1b5e20; }
 .flash-error { background: #ffebee; color: #b71c1c; }
+
+/* Hasil analisis EXPLAIN */
+.explain-report { margin-top: 2rem; }
+.explain-note { color: #546e7a; font-size: 0.9rem; }
+.explain-statement { margin-bottom: 1.5rem; }
+.explain-statement header { display: flex; gap: 0.5rem; align-items: center; }
+.explain-summary { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; font-size: 0.9rem; }
+.explain-summary dt { font-weight: 600; }
+.explain-summary dd { margin: 0; }
+.plan-tree, .plan-tree ul { list-style: none; padding-left: 1.25rem; border-left: 2px solid #cfd8dc; }
+.plan-tree { padding-left: 0.75rem; }
+.plan-node { margin: 0.5rem 0; }
+.plan-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.plan-metrics, .plan-cond { font-size: 0.82rem; color: #455a64; font-variant-numeric: tabular-nums; }
+.plan-slow > .plan-head strong { color: #b71c1c; }

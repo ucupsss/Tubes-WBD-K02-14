@@ -7,7 +7,6 @@ package main
 // Commit/Rollback → Update Migration History.
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -151,7 +150,7 @@ func setup(t *testing.T) env {
 
 	cfg := config.Config{
 		AppEnv:                  "development",
-		SecretKey:               bytes.Repeat([]byte{7}, 32),
+		SecretKey:               testutil.SecretKey,
 		SessionIdleTimeout:      30 * time.Minute,
 		SessionAbsoluteTimeout:  8 * time.Hour,
 		SessionRotationInterval: 15 * time.Minute,
@@ -244,6 +243,7 @@ func TestApp_SpecFlow(t *testing.T) {
 	expect(t, bob.login("bob", testutil.TestPassword), http.StatusSeeOther, "/")
 	expectBody(t, bob.get("/"), "target-test", fmt.Sprintf("/db/%d", dbID))
 	expect(t, bob.get("/admin/users"), http.StatusForbidden, "")
+	expect(t, bob.get("/db/999999"), http.StatusForbidden, "") // D15: ID database tak ada tidak dibedakan dari tak berhak
 
 	expectBody(t, bob.get(fmt.Sprintf("/db/%d", dbID)), "customers")
 	detail := bob.get(fmt.Sprintf("/db/%d/tables/public/customers", dbID))
@@ -373,4 +373,47 @@ func TestApp_UnavailableTarget(t *testing.T) {
 	if strings.Contains(rec.Body.String(), form.Get("password")) && form.Get("password") != "" {
 		t.Fatal("pesan error tidak boleh memuat password koneksi")
 	}
+}
+
+func TestApp_Explain(t *testing.T) {
+	e := setup(t)
+	bobID := testutil.CreateUser(t, e.pool, "bob", false)
+	carolID := testutil.CreateUser(t, e.pool, "carol", false)
+	dbID := testutil.CreateConnection(t, e.pool, e.targetName)
+	editors := testutil.CreateGroup(t, e.pool, "editors")
+	viewers := testutil.CreateGroup(t, e.pool, "viewers")
+	testutil.AddMember(t, e.pool, editors, bobID)
+	testutil.AddMember(t, e.pool, viewers, carolID)
+	testutil.Grant(t, e.pool, editors, dbID, "edit")
+	testutil.Grant(t, e.pool, viewers, dbID, "view")
+	migID := testutil.CreateDraft(t, e.pool, dbID, bobID,
+		"CREATE TABLE t (id INT); INSERT INTO t VALUES (1); SELECT * FROM customers WHERE email = 'a@x.test'")
+	detail := fmt.Sprintf("/db/%d/migrations/%d", dbID, migID)
+
+	bob := newBrowser(t, e.app)
+	bob.login("bob", testutil.TestPassword)
+	expectBody(t, bob.get(detail), "/explain", `name="analyze"`)
+	rec := bob.post(detail+"/explain", url.Values{"analyze": {"1"}})
+	expect(t, rec, http.StatusOK, "")
+	expectBody(t, rec, "Hasil Analisis (EXPLAIN ANALYZE)", "ModifyTable", "(Insert)", "customers_email_key", "Execution time", "di-rollback")
+	if n := scalar[int](t, e.target, `SELECT count(*) FROM information_schema.tables WHERE table_name = 't'`); n != 0 {
+		t.Fatal("analisis tidak boleh meninggalkan table t di target")
+	}
+	if s := scalar[string](t, e.pool, `SELECT status FROM migrations WHERE id = $1`, migID); s != "draft" {
+		t.Fatalf("analisis tidak boleh mengubah status migration, got %s", s)
+	}
+
+	// View Only: tidak melihat tombol dan ditolak di backend.
+	carol := newBrowser(t, e.app)
+	carol.login("carol", testutil.TestPassword)
+	if strings.Contains(carol.get(detail).Body.String(), "/explain") {
+		t.Fatal("user view tidak boleh melihat tombol Analisis")
+	}
+	expect(t, carol.post(detail+"/explain", url.Values{}), http.StatusForbidden, "")
+
+	// Migration yang sudah success tidak dianalisis ulang.
+	bob.get(detail)
+	expect(t, bob.post(detail+"/execute", nil), http.StatusSeeOther, "")
+	bob.get(detail)
+	expect(t, bob.post(detail+"/explain", url.Values{}), http.StatusConflict, "")
 }

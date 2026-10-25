@@ -129,3 +129,9 @@ func hasCreateIndexConcurrently(tokens []string) bool {
 	}
 	return false
 }
+
+// ValidateSQL applies the same rules as saving a migration (D13). Package explain uses it
+// before running statements against a target database.
+func ValidateSQL(sqlText string) error {
+	return validateSQL(sqlText)
+}

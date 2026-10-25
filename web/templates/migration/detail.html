@@ -48,6 +48,16 @@
   <textarea id="sql_text" name="sql_text" rows="12">{{ .Data.Migration.SQLText }}</textarea>
   <button type="submit">Simpan</button>
 </form>
+
+<h2>Analisis</h2>
+<form method="post" action="/db/{{ .Data.Migration.DatabaseID }}/migrations/{{ .Data.Migration.ID }}/explain">
+  <input type="hidden" name="_csrf" value="{{ .CSRFToken }}">
+  <label>
+    <input type="checkbox" name="analyze" value="1">
+    Dengan ANALYZE (menjalankan query, lalu di-rollback)
+  </label>
+  <button type="submit" class="secondary">Analisis</button>
+</form>
 {{ end }}
 
 {{ if .Data.ShowPlan }}
