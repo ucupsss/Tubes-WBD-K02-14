@@ -45,7 +45,8 @@ func TestRender_Pages(t *testing.T) {
 			},
 		})
 		body := rec.Body.String()
-		if rec.Code != http.StatusOK || !strings.Contains(body, "Buat tabel") || !strings.Contains(body, "Analisis") || !strings.Contains(body, "Belum ada percobaan") {
+		// Route EXPLAIN (bonus) belum ada, jadi halaman tidak boleh menampilkan form yang mengarah ke sana.
+		if rec.Code != http.StatusOK || !strings.Contains(body, "Buat tabel") || strings.Contains(body, "/explain") || !strings.Contains(body, "Belum ada percobaan") {
 			t.Fatalf("status=%d body=%s", rec.Code, body)
 		}
 	})
@@ -92,7 +93,7 @@ func TestRender_Pages(t *testing.T) {
 			},
 		})
 		body := rec.Body.String()
-		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "Analisis") || !strings.Contains(body, "Judul wajib diisi") || !strings.Contains(body, `name="analyze"`) {
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "Judul wajib diisi") || strings.Contains(body, "/explain") {
 			t.Fatalf("status=%d body=%s", rec.Code, body)
 		}
 	})

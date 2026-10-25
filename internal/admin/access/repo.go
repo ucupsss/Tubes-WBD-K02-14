@@ -2,8 +2,10 @@ package access
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 )
 
@@ -54,8 +56,11 @@ func (r *PgRepo) GetGrant(ctx context.Context, db platformdb.DBTX, groupID, dbID
 	const q = `SELECT level FROM group_db_access WHERE group_id = $1 AND database_id = $2`
 	var level string
 	err := db.QueryRow(ctx, q, groupID, dbID).Scan(&level)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "none", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("access.GetGrant: %w", err)
 	}
 	return level, nil
 }

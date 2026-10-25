@@ -14,7 +14,7 @@ type AuthorizerMiddleware interface {
 // RegisterRoutes mendaftarkan seluruh route untuk Dashboard dan Database Explorer.
 func RegisterRoutes(mux *http.ServeMux, h *Handler, mw AuthorizerMiddleware) {
 	// Dashboard user (daftar database yang berhak diakses)
-	mux.Handle("GET /", mw.RequireLogin(http.HandlerFunc(h.Dashboard)))
+	mux.Handle("GET /{$}", mw.RequireLogin(http.HandlerFunc(h.Dashboard)))
 
 	// Explorer target database (membutuhkan minimal hak level view)
 	mux.Handle("GET /db/{dbID}", mw.Protect(authz.ActDBView, h.Overview))
