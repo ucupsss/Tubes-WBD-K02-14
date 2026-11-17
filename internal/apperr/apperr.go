@@ -21,6 +21,7 @@ type Error struct {
 	Kind   Kind
 	Msg    string            // AMAN ditampilkan ke user (Bahasa Indonesia)
 	Fields map[string]string // error per field form (opsional)
+	Reason string            // kode mesin untuk API (details.reason), mis. "not_top_of_chain" (opsional)
 	Err    error             // penyebab internal, hanya untuk log
 }
 
@@ -63,6 +64,13 @@ func InvalidFields(msg string, fields map[string]string) *Error {
 
 func Internal(msg string, cause error) *Error {
 	return &Error{Kind: KindInternal, Msg: msg, Err: cause}
+}
+
+// WithReason mengisi kode mesin untuk klien API tanpa mengubah pesan untuk manusia.
+func (e *Error) WithReason(reason string) *Error {
+	cp := *e
+	cp.Reason = reason
+	return &cp
 }
 
 func KindOf(err error) Kind {
