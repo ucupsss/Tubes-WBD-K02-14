@@ -19,11 +19,23 @@ type SessionRevoker interface {
 	RevokeAllForUser(ctx context.Context, userID int64) error
 }
 
+// LeaderGuard memberi tahu group mana yang masih dipimpin user. Opsional (diisi lewat WithLeaderGuard).
+type LeaderGuard interface {
+	LedGroupNames(ctx context.Context, userID int64) ([]string, error)
+}
+
 type Service struct {
 	db       platformdb.DBTX
 	repo     Repo
 	accounts Accounts
 	sessions SessionRevoker
+	leaders  LeaderGuard
+}
+
+// WithLeaderGuard mengaktifkan aturan: leader group tidak boleh dinonaktifkan (D28).
+func (s *Service) WithLeaderGuard(g LeaderGuard) *Service {
+	s.leaders = g
+	return s
 }
 
 func NewService(db platformdb.DBTX, repo Repo, accounts Accounts, sessions SessionRevoker) *Service {
@@ -59,6 +71,16 @@ func (s *Service) Update(ctx context.Context, actorID, id int64, in UpdateInput)
 	promoted := !cur.IsAdmin && in.IsAdmin
 	demoted := cur.IsAdmin && !in.IsAdmin
 	deactivated := cur.IsActive && !in.IsActive
+
+	if deactivated && s.leaders != nil {
+		led, err := s.leaders.LedGroupNames(ctx, id)
+		if err != nil {
+			return err
+		}
+		if len(led) > 0 {
+			return ErrIsLeader
+		}
+	}
 
 	if err := s.repo.UpdateFlags(ctx, s.db, id, in, promoted); err != nil {
 		return err

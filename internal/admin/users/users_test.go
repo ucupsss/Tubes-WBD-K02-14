@@ -267,3 +267,27 @@ func TestService_Create(t *testing.T) {
 		t.Fatalf("id=%d err=%v created=%v", id, err, acc.created)
 	}
 }
+
+type stubLeaders struct{ led map[int64][]string }
+
+func (s stubLeaders) LedGroupNames(ctx context.Context, userID int64) ([]string, error) {
+	return s.led[userID], nil
+}
+
+func TestService_Update_LeaderCannotBeDeactivated(t *testing.T) {
+	repo := newStubRepo(fixtures()...)
+	svc, _, rev := newService(repo)
+	svc.WithLeaderGuard(stubLeaders{led: map[int64][]string{bobID: {"dev"}}})
+
+	err := svc.Update(context.Background(), adminID, bobID, users.UpdateInput{IsAdmin: false, IsActive: false})
+	if !errors.Is(err, users.ErrIsLeader) {
+		t.Fatalf("err = %v, want ErrIsLeader", err)
+	}
+	if len(rev.revoked) != 0 {
+		t.Fatalf("session tidak boleh dicabut saat penonaktifan ditolak: %v", rev.revoked)
+	}
+	// Mengubah hal lain (tidak menonaktifkan) tetap boleh.
+	if err := svc.Update(context.Background(), adminID, bobID, users.UpdateInput{IsAdmin: true, IsActive: true}); err != nil {
+		t.Fatalf("update biasa: %v", err)
+	}
+}

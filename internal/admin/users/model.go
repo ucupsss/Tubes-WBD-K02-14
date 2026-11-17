@@ -9,6 +9,8 @@ import (
 var (
 	ErrNotFound    = apperr.NotFound("User tidak ditemukan")
 	ErrSelfLockout = apperr.Conflict("Anda tidak bisa mencabut status admin atau menonaktifkan akun sendiri")
+	// ErrIsLeader: user yang masih memimpin group tidak boleh dinonaktifkan (D28).
+	ErrIsLeader = apperr.Conflict("User ini masih menjadi leader group. Ganti leader terlebih dahulu").WithReason("is_leader")
 )
 
 // User adalah tampilan user untuk halaman admin (tanpa password hash).

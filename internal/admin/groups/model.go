@@ -12,6 +12,11 @@ var (
 	ErrNotFound     = apperr.NotFound("Group tidak ditemukan")
 	ErrNameTaken    = apperr.Conflict("Nama group sudah dipakai")
 	ErrUserNotFound = apperr.NotFound("User tidak ditemukan")
+
+	// ErrLeaderNotMember: leader harus anggota group (D28).
+	ErrLeaderNotMember = apperr.Conflict("Leader harus anggota group").WithReason("leader_not_member")
+	// ErrIsLeader: leader tidak boleh dikeluarkan/dinonaktifkan sebelum leader diganti (D28).
+	ErrIsLeader = apperr.Conflict("User ini masih menjadi leader group. Ganti leader terlebih dahulu").WithReason("is_leader")
 )
 
 const (
@@ -25,12 +30,21 @@ type Group struct {
 	Description string
 	CreatedAt   time.Time
 	MemberCount int
+	LeaderID    *int64
+	LeaderName  string
+}
+
+// Ref adalah rujukan ringkas ke group (id dan nama).
+type Ref struct {
+	ID   int64
+	Name string
 }
 
 type Member struct {
 	UserID   int64
 	Username string
 	IsActive bool
+	IsLeader bool
 }
 
 // UserOption adalah user aktif yang belum menjadi anggota (pilihan di form tambah anggota).

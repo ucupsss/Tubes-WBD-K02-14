@@ -142,3 +142,55 @@ func TestPg_AddMemberBumpsPrivilege(t *testing.T) {
 		t.Fatalf("group tidak ada: err = %v", err)
 	}
 }
+
+func TestPg_Leader(t *testing.T) {
+	pool := testutil.NewPlatformDB(t)
+	svc := groups.NewService(pool, groups.NewPgRepo(), auth.NewPrivilegeBumper(pool))
+	ctx := context.Background()
+
+	gid, err := svc.Create(ctx, groups.Input{Name: "dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := testutil.CreateUser(t, pool, "alice", false)
+	bob := testutil.CreateUser(t, pool, "bob", false)
+	if err := svc.AddMember(ctx, gid, alice); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bukan anggota → ditolak; anggota → diterima.
+	if err := svc.SetLeader(ctx, gid, &bob); !errors.Is(err, groups.ErrLeaderNotMember) {
+		t.Fatalf("bob bukan anggota: err = %v", err)
+	}
+	if err := svc.SetLeader(ctx, gid, &alice); err != nil {
+		t.Fatalf("SetLeader: %v", err)
+	}
+
+	d, err := svc.Detail(ctx, gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Group.LeaderID == nil || *d.Group.LeaderID != alice || d.Group.LeaderName != "alice" {
+		t.Fatalf("group = %+v", d.Group)
+	}
+	if len(d.Members) != 1 || !d.Members[0].IsLeader {
+		t.Fatalf("members = %+v", d.Members)
+	}
+	if names, _ := svc.LedGroupNames(ctx, alice); len(names) != 1 || names[0] != "dev" {
+		t.Fatalf("LedGroupNames = %v", names)
+	}
+
+	// Leader tidak boleh dikeluarkan.
+	if err := svc.RemoveMember(ctx, gid, alice); !errors.Is(err, groups.ErrIsLeader) {
+		t.Fatalf("RemoveMember leader: err = %v", err)
+	}
+
+	// Menghapus user yang jadi leader mengosongkan leader_id (ON DELETE SET NULL).
+	if _, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, alice); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := svc.Get(ctx, gid)
+	if g.LeaderID != nil {
+		t.Fatalf("leader_id seharusnya NULL, got %v", *g.LeaderID)
+	}
+}
