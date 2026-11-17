@@ -71,7 +71,7 @@ func Logger(logger *slog.Logger) func(http.Handler) http.Handler {
 			if p, ok := authz.PrincipalFrom(r.Context()); ok {
 				attrs = append(attrs, "user_id", p.UserID)
 			}
-			logger.Info("request", attrs...)
+			logger.InfoContext(r.Context(), "http.request", attrs...)
 		})
 	}
 }

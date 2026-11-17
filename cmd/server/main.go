@@ -10,13 +10,14 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/db"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/config"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 	"github.com/ucupsss/Tubes-WBD-K02-14/web"
 )
 
 func main() {
 	cfg := config.MustLoad()
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := logx.New(os.Stdout, slog.LevelInfo)
 	slog.SetDefault(logger)
 
 	ctx := context.Background()

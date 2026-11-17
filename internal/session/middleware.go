@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 )
 
 type ctxKey struct{}
@@ -89,6 +90,7 @@ func (mw *Middleware) Load(next http.Handler) http.Handler {
 		if res.NewToken != "" {
 			mw.mgr.SetCookie(w, res.NewToken)
 		}
+		logx.SetActor(r.Context(), res.User.Username)
 		ctx := WithSession(r.Context(), res.Session)
 		ctx = authz.WithPrincipal(ctx, authz.Principal{
 			UserID:   res.User.ID,
