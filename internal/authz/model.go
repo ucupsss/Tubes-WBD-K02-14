@@ -82,4 +82,15 @@ const (
 	ActMigrationExecute       Action = "db.migration.execute"
 	ActMigrationDelete        Action = "db.migration.delete"
 	ActMigrationExplain       Action = "db.migration.explain"
+
+	// Milestone 2. Aksi alur review/eksekusi; dipakai handler milik C dan A.
+	ActMigrationSubmit   Action = "db.migration.submit"   // ajukan review (apply/forward)
+	ActMigrationRollback Action = "db.migration.rollback" // ajukan rollback
+	ActMigrationRun      Action = "db.migration.run"      // tombol Jalankan: approved → queued
+	ActMigrationResume   Action = "db.migration.resume"   // lanjutkan execution partial
+	ActMigrationCancel   Action = "db.migration.cancel"   // batalkan sebelum berjalan
+
+	// Approval: cukup login. Pengecekan "leader group" dilakukan service approval, bukan policy.
+	ActApprovalView   Action = "approval.view"
+	ActApprovalDecide Action = "approval.decide"
 )
