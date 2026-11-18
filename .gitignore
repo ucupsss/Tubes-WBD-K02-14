@@ -7,3 +7,8 @@
 coverage.*
 .DS_Store
 .idea/
+
+# Frontend (Milestone 2)
+frontend/node_modules/
+web/dist/*
+!web/dist/.gitkeep
