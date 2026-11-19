@@ -2,14 +2,18 @@
 
 package main
 
-// Test end-to-end lewat router produksi (newApp) dengan template HTML asli, mengikuti alur minimum spesifikasi:
+// Test end-to-end lewat router produksi (newApp). Login dan administrasi memakai API JSON seperti SPA;
+// explorer dan migration masih halaman HTML (template) sampai dipindah ke SPA. Alur minimum spesifikasi:
 // Login → Access Control → Select Database → View Schema/Data → Create Migration → Execute →
 // Commit/Rollback → Update Migration History.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -83,11 +88,67 @@ func (b *browser) post(path string, form url.Values) *httptest.ResponseRecorder 
 	return b.do(http.MethodPost, path, form)
 }
 
+// api mengirim JSON seperti SPA: cookie milik browser ini dan token CSRF di header X-CSRF-Token.
+func (b *browser) api(method, path string, body any) *httptest.ResponseRecorder {
+	b.t.Helper()
+	return b.apiWithToken(method, path, body, b.csrf)
+}
+
+func (b *browser) apiWithToken(method, path string, body any, token string) *httptest.ResponseRecorder {
+	b.t.Helper()
+	var rd io.Reader = http.NoBody
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			b.t.Fatal(err)
+		}
+		rd = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, path, rd)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if method != http.MethodGet {
+		req.Header.Set("Origin", "http://example.com")
+		if token != "" {
+			req.Header.Set(csrf.HeaderName, token)
+		}
+	}
+	for _, c := range b.cookies {
+		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+	}
+	rec := httptest.NewRecorder()
+	b.h.ServeHTTP(rec, req)
+	for _, c := range rec.Result().Cookies() {
+		if c.MaxAge < 0 {
+			delete(b.cookies, c.Name)
+		} else {
+			b.cookies[c.Name] = c
+		}
+	}
+	return rec
+}
+
+func jsonField(t *testing.T, rec *httptest.ResponseRecorder, key string) string {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bukan JSON: %v\n%.300s", err, rec.Body.String())
+	}
+	v, _ := out[key].(string)
+	return v
+}
+
+// login mengikuti alur SPA: GET /api/csrf → POST /api/auth/login. Token CSRF milik session disimpan
+// di b.csrf sehingga form HTML (explorer/migration) dan request API berikutnya memakainya.
 func (b *browser) login(username, password string) *httptest.ResponseRecorder {
 	b.t.Helper()
-	page := b.get("/login")
-	expect(b.t, page, http.StatusOK, "")
-	return b.post("/login", url.Values{"username": {username}, "password": {password}})
+	pre := jsonField(b.t, b.get("/api/csrf"), "csrf_token")
+	rec := b.apiWithToken(http.MethodPost, "/api/auth/login", map[string]string{"username": username, "password": password}, pre)
+	if rec.Code == http.StatusOK {
+		b.csrf = jsonField(b.t, rec, "csrf_token")
+	}
+	return rec
 }
 
 func extractCSRF(html string) string {
@@ -156,12 +217,32 @@ func setup(t *testing.T) env {
 		SessionRotationInterval: 15 * time.Minute,
 		SessionGracePeriod:      30 * time.Second,
 	}
-	a, err := newApp(cfg, pool, web.FS, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a, err := newApp(cfg, pool, withSPA(web.FS), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Conns.CloseAll)
 	return env{pool: pool, app: a.Handler, targetName: targetName, target: target}
+}
+
+// withSPA menambahkan dist/index.html palsu ke web.FS: di CI frontend belum di-build, tetapi routing
+// SPA (fallback index.html) tetap harus teruji.
+func withSPA(base fs.FS) fs.FS {
+	return overlayFS{base: base, extra: fstest.MapFS{
+		"dist/index.html": {Data: []byte(`<!doctype html><html><body><div id="root"></div></body></html>`)},
+	}}
+}
+
+type overlayFS struct {
+	base  fs.FS
+	extra fstest.MapFS
+}
+
+func (o overlayFS) Open(name string) (fs.File, error) {
+	if f, err := o.extra.Open(name); err == nil {
+		return f, nil
+	}
+	return o.base.Open(name)
 }
 
 // targetForm mengisi form koneksi baru yang menunjuk ke database target milik test.
@@ -188,17 +269,32 @@ func TestApp_PublicRoutes(t *testing.T) {
 
 	expect(t, b.get("/healthz"), http.StatusOK, "")
 	expect(t, b.get("/static/css/app.css"), http.StatusOK, "")
-	rec := b.get("/login")
-	expect(t, rec, http.StatusOK, "")
-	expectBody(t, rec, `name="username"`, `name="password"`)
-	if b.csrf == "" {
-		t.Fatal("form login harus berisi token CSRF")
+
+	// Halaman SPA: path klien dijawab index.html (guard login ada di router SPA, bukan di server).
+	for _, p := range []string{"/", "/login", "/approvals", "/admin/users", "/admin/groups/3", "/admin/databases"} {
+		rec := b.get(p)
+		expect(t, rec, http.StatusOK, "")
+		expectBody(t, rec, `id="root"`)
+		if rec.Header().Get("Content-Security-Policy") == "" {
+			t.Fatalf("%s: SPA harus memakai header CSP", p)
+		}
 	}
-	nf := b.get("/halaman-yang-tidak-ada")
+
+	// File ber-ekstensi yang tidak ada → halaman error bawaan, bukan index.html menyamar sebagai aset.
+	nf := b.get("/assets/tidak-ada.js")
 	expect(t, nf, http.StatusNotFound, "")
 	expectBody(t, nf, `class="error-code">404<`, "Tidak Ditemukan", "<title>404 Tidak Ditemukan · Tubes WBD</title>", "<strong>Tubes WBD</strong>")
 
-	for _, p := range []string{"/", "/admin/users", "/admin/groups", "/admin/databases", "/db/1", "/db/1/migrations"} {
+	// API: 404 JSON, dan endpoint terproteksi 401 JSON (bukan redirect).
+	rec := b.get("/api/tidak-ada")
+	expect(t, rec, http.StatusNotFound, "")
+	expectBody(t, rec, `"not_found"`)
+	rec = b.get("/api/admin/users")
+	expect(t, rec, http.StatusUnauthorized, "")
+	expectBody(t, rec, `"unauthenticated"`)
+
+	// Halaman HTML lama (explorer/migration) tetap mengarahkan ke /login yang kini milik SPA.
+	for _, p := range []string{"/db/1", "/db/1/migrations"} {
 		expect(t, b.get(p), http.StatusSeeOther, "/login")
 	}
 }
@@ -208,46 +304,50 @@ func TestApp_SpecFlow(t *testing.T) {
 	testutil.CreateUser(t, e.pool, "admin", true)
 	bobID := testutil.CreateUser(t, e.pool, "bob", false)
 
-	// 1. Login admin lewat form (cookie session HttpOnly, tanpa password/token di body).
+	// 1. Login admin lewat API (cookie session HttpOnly, tanpa password/token di body).
 	admin := newBrowser(t, e.app)
 	rec := admin.login("admin", testutil.TestPassword)
-	expect(t, rec, http.StatusSeeOther, "/")
+	expect(t, rec, http.StatusOK, "")
 	if tok := admin.cookies[session.CookieName]; tok == nil || !tok.HttpOnly {
 		t.Fatal("login harus memasang cookie session HttpOnly")
 	}
-	expectBody(t, admin.get("/admin/users"), "bob")
+	expectBody(t, admin.api(http.MethodGet, "/api/admin/users", nil), "bob")
 
 	// 2. Admin mendaftarkan koneksi database target, membuat group, menambah bob, memberi akses view.
-	expect(t, admin.get("/admin/databases/new"), http.StatusOK, "")
-	expect(t, admin.post("/admin/databases", targetForm(t, "target-test", e.targetName)), http.StatusSeeOther, "/admin/databases")
+	rec = admin.api(http.MethodPost, "/api/admin/databases", targetJSON(t, "target-test", e.targetName))
+	expect(t, rec, http.StatusCreated, "")
 	dbID := scalar[int64](t, e.pool, `SELECT id FROM db_connections WHERE name = 'target-test'`)
-	list := admin.get("/admin/databases")
-	if strings.Contains(list.Body.String(), "password_enc") {
+	list := admin.api(http.MethodGet, "/api/admin/databases", nil)
+	if strings.Contains(list.Body.String(), "password") {
 		t.Fatal("password koneksi tidak boleh tampil")
 	}
 
-	admin.get("/admin/groups/new")
-	expect(t, admin.post("/admin/groups", url.Values{"name": {"analis"}}), http.StatusSeeOther, "")
+	expect(t, admin.api(http.MethodPost, "/api/admin/groups", map[string]string{"name": "analis"}), http.StatusCreated, "")
 	groupID := scalar[int64](t, e.pool, `SELECT id FROM groups WHERE name = 'analis'`)
-	admin.get(fmt.Sprintf("/admin/groups/%d", groupID))
-	expect(t, admin.post(fmt.Sprintf("/admin/groups/%d/members", groupID), url.Values{"user_id": {fmt.Sprint(bobID)}}),
-		http.StatusSeeOther, fmt.Sprintf("/admin/groups/%d", groupID))
+	expect(t, admin.api(http.MethodPost, fmt.Sprintf("/api/admin/groups/%d/members", groupID), map[string]int64{"user_id": bobID}),
+		http.StatusNoContent, "")
 
-	accessPath := fmt.Sprintf("/admin/groups/%d/access", groupID)
-	admin.get(accessPath)
-	expect(t, admin.post(accessPath, url.Values{fmt.Sprintf("grant_%d", dbID): {"view"}}), http.StatusSeeOther, accessPath)
+	accessPath := fmt.Sprintf("/api/admin/groups/%d/access", groupID)
+	grant := func(level string) map[string]any {
+		return map[string]any{"grants": map[string]string{fmt.Sprint(dbID): level}}
+	}
+	expect(t, admin.api(http.MethodPut, accessPath, grant("view")), http.StatusNoContent, "")
 
 	// Admin tidak otomatis punya akses ke database (D2).
 	expect(t, admin.get(fmt.Sprintf("/db/%d", dbID)), http.StatusForbidden, "")
 
 	// 3. Bob login, memilih database dari dashboard, melihat schema & data.
 	bob := newBrowser(t, e.app)
-	expect(t, bob.login("bob", testutil.TestPassword), http.StatusSeeOther, "/")
-	expectBody(t, bob.get("/"), "target-test", fmt.Sprintf("/db/%d", dbID))
-	forbidden := bob.get("/admin/users")
+	expect(t, bob.login("bob", testutil.TestPassword), http.StatusOK, "")
+	dash := bob.api(http.MethodGet, "/api/databases", nil)
+	expect(t, dash, http.StatusOK, "")
+	expectBody(t, dash, "target-test", fmt.Sprintf(`"id":%d`, dbID), `"level":"view"`)
+	expect(t, bob.api(http.MethodGet, "/api/admin/users", nil), http.StatusForbidden, "")
+
+	// D15: ID database tak ada tidak dibedakan dari tak berhak; halaman error memuat kode dan penjelasan.
+	forbidden := bob.get("/db/999999")
 	expect(t, forbidden, http.StatusForbidden, "")
 	expectBody(t, forbidden, `class="error-code">403<`, "Akses Ditolak", "Hubungi Platform Admin")
-	expect(t, bob.get("/db/999999"), http.StatusForbidden, "") // D15: ID database tak ada tidak dibedakan dari tak berhak
 
 	expectBody(t, bob.get(fmt.Sprintf("/db/%d", dbID)), "customers")
 	detail := bob.get(fmt.Sprintf("/db/%d/tables/public/customers", dbID))
@@ -266,8 +366,7 @@ func TestApp_SpecFlow(t *testing.T) {
 	expect(t, bob.post(migPath, url.Values{"title": {"x"}, "sql_text": {"CREATE TABLE x (id int)"}}), http.StatusForbidden, "")
 
 	// 4. Admin menaikkan akses ke edit → session bob dirotasi pada request berikutnya.
-	admin.get(accessPath)
-	expect(t, admin.post(accessPath, url.Values{fmt.Sprintf("grant_%d", dbID): {"edit"}}), http.StatusSeeOther, accessPath)
+	expect(t, admin.api(http.MethodPut, accessPath, grant("edit")), http.StatusNoContent, "")
 	before := bob.cookies[session.CookieName].Value
 	expect(t, bob.get(migPath+"/new"), http.StatusOK, "")
 	if bob.cookies[session.CookieName].Value == before {
@@ -318,36 +417,42 @@ func TestApp_SpecFlow(t *testing.T) {
 	}
 
 	// 8. Pencabutan akses: bob dinonaktifkan → session langsung mati.
-	admin.get(fmt.Sprintf("/admin/users/%d/edit", bobID))
-	expect(t, admin.post(fmt.Sprintf("/admin/users/%d/edit", bobID), url.Values{}), http.StatusSeeOther, "")
+	expect(t, admin.api(http.MethodPut, fmt.Sprintf("/api/admin/users/%d", bobID), map[string]bool{"is_admin": false, "is_active": false}),
+		http.StatusNoContent, "")
 	expect(t, bob.get(migPath), http.StatusSeeOther, "/login")
+	expect(t, bob.api(http.MethodGet, "/api/me", nil), http.StatusUnauthorized, "")
 
 	// 9. Logout admin → cookie lama ditolak.
 	oldCookie := admin.cookies[session.CookieName].Value
-	admin.get("/")
-	expect(t, admin.post("/logout", nil), http.StatusSeeOther, "/login")
+	expect(t, admin.api(http.MethodPost, "/api/auth/logout", nil), http.StatusNoContent, "")
 	stale := newBrowser(t, e.app)
 	stale.cookies[session.CookieName] = &http.Cookie{Name: session.CookieName, Value: oldCookie}
-	expect(t, stale.get("/admin/users"), http.StatusSeeOther, "/login")
+	expect(t, stale.api(http.MethodGet, "/api/admin/users", nil), http.StatusUnauthorized, "")
 }
 
-func TestApp_CSRFRequired(t *testing.T) {
+func TestApp_HTMLFormCSRFRequired(t *testing.T) {
+	// Form HTML lama (migration) tetap wajib membawa token CSRF milik session.
 	e := setup(t)
-	testutil.CreateUser(t, e.pool, "admin", true)
-	b := newBrowser(t, e.app)
-	expect(t, b.login("admin", testutil.TestPassword), http.StatusSeeOther, "/")
+	bobID := testutil.CreateUser(t, e.pool, "bob", false)
+	dbID := testutil.CreateConnection(t, e.pool, e.targetName)
+	g := testutil.CreateGroup(t, e.pool, "editors")
+	testutil.AddMember(t, e.pool, g, bobID)
+	testutil.Grant(t, e.pool, g, dbID, "edit")
 
-	form := url.Values{"name": {"tanpa-csrf"}}
+	b := newBrowser(t, e.app)
+	expect(t, b.login("bob", testutil.TestPassword), http.StatusOK, "")
+	migPath := fmt.Sprintf("/db/%d/migrations", dbID)
+	form := url.Values{"title": {"tanpa-csrf"}, "sql_text": {"SELECT 1"}}
+
 	form.Set(csrf.FormField, "")
-	expect(t, b.post("/admin/groups", form), http.StatusForbidden, "")
+	expect(t, b.do(http.MethodPost, migPath, form), http.StatusForbidden, "")
 	form.Set(csrf.FormField, "salah")
-	expect(t, b.post("/admin/groups", form), http.StatusForbidden, "")
-	if n := scalar[int](t, e.pool, `SELECT count(*) FROM groups`); n != 0 {
+	expect(t, b.do(http.MethodPost, migPath, form), http.StatusForbidden, "")
+	if n := scalar[int](t, e.pool, `SELECT count(*) FROM migrations`); n != 0 {
 		t.Fatal("POST tanpa CSRF valid tidak boleh mengubah data")
 	}
 
-	b.get("/admin/groups/new")
-	expect(t, b.post("/admin/groups", url.Values{"name": {"dengan-csrf"}}), http.StatusSeeOther, "")
+	expect(t, b.post(migPath, url.Values{"title": {"dengan-csrf"}, "sql_text": {"SELECT 1"}}), http.StatusSeeOther, "")
 }
 
 func TestApp_UnavailableTarget(t *testing.T) {
@@ -357,10 +462,9 @@ func TestApp_UnavailableTarget(t *testing.T) {
 
 	admin := newBrowser(t, e.app)
 	admin.login("admin", testutil.TestPassword)
-	form := targetForm(t, "mati", e.targetName)
-	form.Set("port", "1") // tidak ada Postgres di port ini
-	admin.get("/admin/databases/new")
-	expect(t, admin.post("/admin/databases", form), http.StatusSeeOther, "/admin/databases")
+	conn := targetJSON(t, "mati", e.targetName)
+	conn["port"] = 1 // tidak ada Postgres di port ini
+	expect(t, admin.api(http.MethodPost, "/api/admin/databases", conn), http.StatusCreated, "")
 	dbID := scalar[int64](t, e.pool, `SELECT id FROM db_connections WHERE name = 'mati'`)
 
 	g := testutil.CreateGroup(t, e.pool, "g")
@@ -374,7 +478,7 @@ func TestApp_UnavailableTarget(t *testing.T) {
 	bob.login("bob", testutil.TestPassword)
 	rec := bob.get(fmt.Sprintf("/db/%d", dbID))
 	expect(t, rec, http.StatusBadGateway, "")
-	if strings.Contains(rec.Body.String(), form.Get("password")) && form.Get("password") != "" {
+	if pw, _ := conn["password"].(string); pw != "" && strings.Contains(rec.Body.String(), pw) {
 		t.Fatal("pesan error tidak boleh memuat password koneksi")
 	}
 }

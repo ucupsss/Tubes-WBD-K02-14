@@ -2,23 +2,28 @@
 
 package auth_test
 
-// Test alur lengkap lewat middleware asli: session.Load → csrf.Verify → mux (authz.Protect → handler).
+// Test alur lengkap lewat middleware asli: session.Load → csrf.Verify → mux (authz.Protect → handler API JSON).
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/access"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/groups"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/users"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/api"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/approval"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/csrf"
@@ -26,7 +31,6 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/session"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/testutil"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
 type wallClock struct{}
@@ -37,23 +41,33 @@ const origin = "http://example.com" // host default httptest.NewRequest
 
 func newApp(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
-	v := view.New()
-	onErr := func(w http.ResponseWriter, r *http.Request, err error) { httpx.HandleError(w, r, v, err) }
+	onErr := func(w http.ResponseWriter, r *http.Request, err error) { httpx.HandleError(w, r, nil, err) }
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	authSvc := auth.NewService(pool, auth.NewPgRepo())
 	sessMgr := session.NewManager(pool, session.NewPgRepo(), authSvc, wallClock{}, session.DefaultConfig())
-	authzMw := authz.NewMiddleware(authz.NewAuthorizer(dbconn.NewGrantRepo(pool)), onErr)
+	bumper := auth.NewPrivilegeBumper(pool)
+	grants := dbconn.NewGrantRepo(pool)
+	az := authz.NewAuthorizer(grants)
+	authzMw := authz.NewMiddleware(az, onErr)
+
+	groupsSvc := groups.NewService(pool, groups.NewPgRepo(), bumper)
+	usersSvc := users.NewService(pool, users.NewPgRepo(), authSvc, sessMgr).WithLeaderGuard(groupsSvc)
 
 	mux := http.NewServeMux()
-	auth.RegisterRoutes(mux, auth.NewHandler(authSvc, sessMgr, v, logger), authzMw)
-	users.RegisterRoutes(mux, users.NewHandler(users.NewService(pool, users.NewPgRepo(), authSvc, sessMgr), v), authzMw)
-	groups.RegisterRoutes(mux, groups.NewHandler(groups.NewService(pool, groups.NewPgRepo(), auth.NewPrivilegeBumper(pool)), v), authzMw)
+	api.New(api.Deps{
+		Auth: authSvc, Sessions: sessMgr, Users: usersSvc, Groups: groupsSvc,
+		Access:    access.NewService(pool, access.NewPgRepo(), bumper),
+		Databases: databases.NewService(pool, databases.NewPgRepo(), nil, testutil.SecretKey),
+		Approval:  approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), nil),
+		Authz:     az, Logger: logger,
+	}).RegisterRoutes(mux, authzMw)
+	auth.RegisterRoutes(mux, auth.NewHandler(authSvc, sessMgr, nil, logger), authzMw)
 
 	return session.NewMiddleware(sessMgr, onErr).Load(csrf.NewMiddleware(csrf.Config{}, onErr).Verify(mux))
 }
 
-// browser menyimpan cookie antar request seperti browser sungguhan.
+// browser menyimpan cookie antar request seperti browser sungguhan, dan berbicara JSON seperti SPA.
 type browser struct {
 	t       *testing.T
 	app     http.Handler
@@ -68,17 +82,25 @@ func newBrowser(t *testing.T, app http.Handler, cookies ...*http.Cookie) *browse
 	return b
 }
 
-func (b *browser) do(method, path string, form url.Values) *httptest.ResponseRecorder {
+func (b *browser) request(method, path string, body any, headers map[string]string) *httptest.ResponseRecorder {
 	b.t.Helper()
-	var req *http.Request
-	if form != nil {
-		req = httptest.NewRequest(method, path, strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	} else {
-		req = httptest.NewRequest(method, path, nil)
+	var rd io.Reader = http.NoBody
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			b.t.Fatal(err)
+		}
+		rd = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, path, rd)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if method != http.MethodGet {
 		req.Header.Set("Origin", origin)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	for _, c := range b.cookies {
 		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
@@ -95,10 +117,17 @@ func (b *browser) do(method, path string, form url.Values) *httptest.ResponseRec
 	return rec
 }
 
-func (b *browser) get(path string) *httptest.ResponseRecorder { return b.do(http.MethodGet, path, nil) }
+func (b *browser) get(path string) *httptest.ResponseRecorder {
+	return b.request(http.MethodGet, path, nil, nil)
+}
 
-func (b *browser) post(path string, form url.Values) *httptest.ResponseRecorder {
-	return b.do(http.MethodPost, path, form)
+// send mengirim mutasi JSON dengan token CSRF di header X-CSRF-Token (kosong = tanpa header).
+func (b *browser) send(method, path string, body any, token string) *httptest.ResponseRecorder {
+	h := map[string]string{}
+	if token != "" {
+		h[csrf.HeaderName] = token
+	}
+	return b.request(method, path, body, h)
 }
 
 func (b *browser) sessionToken() string {
@@ -108,21 +137,26 @@ func (b *browser) sessionToken() string {
 	return ""
 }
 
-// formLogin menjalani alur login asli: GET /login (dapat cookie CSRF pre-session) lalu POST /login.
-func (b *browser) formLogin(username, password string) *httptest.ResponseRecorder {
+// apiLogin menjalani alur login SPA: GET /api/csrf (cookie CSRF pre-session) lalu POST /api/auth/login.
+func (b *browser) apiLogin(username, password string) *httptest.ResponseRecorder {
 	b.t.Helper()
-	b.get("/login")
-	pre, ok := b.cookies[csrf.PreCookieName]
-	if !ok {
-		b.t.Fatal("GET /login harus menerbitkan cookie CSRF pre-session")
+	rec := b.get("/api/csrf")
+	var out struct {
+		Token string `json:"csrf_token"`
 	}
-	return b.post("/login", url.Values{"username": {username}, "password": {password}, csrf.FormField: {pre.Value}})
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Token == "" {
+		b.t.Fatalf("GET /api/csrf harus mengembalikan token: %v %s", err, rec.Body.String())
+	}
+	if _, ok := b.cookies[csrf.PreCookieName]; !ok {
+		b.t.Fatal("GET /api/csrf harus menerbitkan cookie CSRF pre-session")
+	}
+	return b.send(http.MethodPost, "/api/auth/login", map[string]string{"username": username, "password": password}, out.Token)
 }
 
-func expectStatus(t *testing.T, rec *httptest.ResponseRecorder, status int, location string) {
+func expectStatus(t *testing.T, rec *httptest.ResponseRecorder, status int) {
 	t.Helper()
-	if rec.Code != status || (location != "" && rec.Header().Get("Location") != location) {
-		t.Fatalf("status=%d loc=%q, want %d %q", rec.Code, rec.Header().Get("Location"), status, location)
+	if rec.Code != status {
+		t.Fatalf("status=%d, want %d\nbody: %.300s", rec.Code, status, rec.Body.String())
 	}
 }
 
@@ -141,8 +175,8 @@ func TestFlow_LoginSuccess(t *testing.T) {
 	alice := testutil.CreateUser(t, pool, "alice", true)
 	b := newBrowser(t, newApp(t, pool))
 
-	rec := b.formLogin("alice", testutil.TestPassword)
-	expectStatus(t, rec, http.StatusSeeOther, "/")
+	rec := b.apiLogin("alice", testutil.TestPassword)
+	expectStatus(t, rec, http.StatusOK)
 
 	var ck *http.Cookie
 	for _, c := range rec.Result().Cookies() {
@@ -155,13 +189,13 @@ func TestFlow_LoginSuccess(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if strings.Contains(body, testutil.TestPassword) || strings.Contains(body, ck.Value) {
-		t.Fatal("password/token tidak boleh ada di body")
+		t.Fatal("password/token session tidak boleh ada di body")
 	}
 	if _, total := revokedSessions(t, pool, alice); total != 1 {
 		t.Fatalf("session di DB = %d, want 1", total)
 	}
-	// Sudah login: halaman admin bisa dibuka.
-	expectStatus(t, b.get("/admin/users"), http.StatusOK, "")
+	// Sudah login: endpoint admin bisa dibuka.
+	expectStatus(t, b.get("/api/admin/users"), http.StatusOK)
 }
 
 func TestFlow_LoginFailures(t *testing.T) {
@@ -180,7 +214,11 @@ func TestFlow_LoginFailures(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			b := newBrowser(t, app)
-			expectStatus(t, b.formLogin(tt.user, tt.pass), http.StatusUnauthorized, "")
+			rec := b.apiLogin(tt.user, tt.pass)
+			expectStatus(t, rec, http.StatusUnauthorized)
+			if !strings.Contains(rec.Body.String(), "invalid_credentials") {
+				t.Fatalf("body = %s", rec.Body.String())
+			}
 			if b.sessionToken() != "" {
 				t.Fatal("login gagal tidak boleh membuat cookie session")
 			}
@@ -192,23 +230,22 @@ func TestFlow_LoginCSRF(t *testing.T) {
 	pool := testutil.NewPlatformDB(t)
 	testutil.CreateUser(t, pool, "alice", false)
 	app := newApp(t, pool)
-	creds := url.Values{"username": {"alice"}, "password": {testutil.TestPassword}}
+	creds := map[string]string{"username": "alice", "password": testutil.TestPassword}
 
+	// Tanpa token CSRF.
 	b := newBrowser(t, app)
-	b.get("/login")
-	expectStatus(t, b.post("/login", creds), http.StatusForbidden, "")
+	b.get("/api/csrf")
+	expectStatus(t, b.send(http.MethodPost, "/api/auth/login", creds, ""), http.StatusForbidden)
+
+	// Token salah.
+	expectStatus(t, b.send(http.MethodPost, "/api/auth/login", creds, "token-salah"), http.StatusForbidden)
 
 	// Origin dari situs lain ditolak walau token cocok.
 	b = newBrowser(t, app)
-	b.get("/login")
-	form := url.Values{"username": creds["username"], "password": creds["password"], csrf.FormField: {b.cookies[csrf.PreCookieName].Value}}
-	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", "http://evil.test")
-	req.AddCookie(b.cookies[csrf.PreCookieName])
-	rec := httptest.NewRecorder()
-	app.ServeHTTP(rec, req)
-	expectStatus(t, rec, http.StatusForbidden, "")
+	b.get("/api/csrf")
+	pre := b.cookies[csrf.PreCookieName].Value
+	rec := b.request(http.MethodPost, "/api/auth/login", creds, map[string]string{csrf.HeaderName: pre, "Origin": "http://evil.test"})
+	expectStatus(t, rec, http.StatusForbidden)
 	if strings.Contains(rec.Header().Get("Set-Cookie"), session.CookieName) {
 		t.Fatal("login CSRF tidak boleh membuat session")
 	}
@@ -218,16 +255,26 @@ func TestFlow_AccessControl(t *testing.T) {
 	pool := testutil.NewPlatformDB(t)
 	bob := testutil.CreateUser(t, pool, "bob", false)
 	app := newApp(t, pool)
+	paths := []string{"/api/admin/users", "/api/admin/groups", "/api/admin/databases"}
 
 	anon := newBrowser(t, app)
-	for _, p := range []string{"/admin/users", "/admin/groups", "/admin/users/new"} {
-		expectStatus(t, anon.get(p), http.StatusSeeOther, "/login")
+	for _, p := range paths {
+		expectStatus(t, anon.get(p), http.StatusUnauthorized)
 	}
 
 	nonAdmin := newBrowser(t, app, testutil.LoginSession(t, pool, bob))
-	for _, p := range []string{"/admin/users", "/admin/groups", "/admin/users/new"} {
-		expectStatus(t, nonAdmin.get(p), http.StatusForbidden, "")
+	for _, p := range paths {
+		expectStatus(t, nonAdmin.get(p), http.StatusForbidden)
 	}
+}
+
+func countUsers(t *testing.T, pool *pgxpool.Pool, username string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM users WHERE username = $1`, username).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestFlow_MutationNeedsCSRF(t *testing.T) {
@@ -235,23 +282,16 @@ func TestFlow_MutationNeedsCSRF(t *testing.T) {
 	admin := testutil.CreateUser(t, pool, "admin", true)
 	cookie, token := testutil.LoginSessionCSRF(t, pool, admin)
 	b := newBrowser(t, newApp(t, pool), cookie)
-	form := func(tok string) url.Values {
-		v := url.Values{"username": {"carol"}, "password": {testutil.TestPassword}}
-		if tok != "" {
-			v.Set(csrf.FormField, tok)
-		}
-		return v
-	}
+	body := map[string]any{"username": "carol", "password": testutil.TestPassword}
 
-	expectStatus(t, b.post("/admin/users", form("")), http.StatusForbidden, "")
-	expectStatus(t, b.post("/admin/users", form("token-salah")), http.StatusForbidden, "")
-	var n int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM users WHERE username = 'carol'`).Scan(&n); err != nil || n != 0 {
+	expectStatus(t, b.send(http.MethodPost, "/api/admin/users", body, ""), http.StatusForbidden)
+	expectStatus(t, b.send(http.MethodPost, "/api/admin/users", body, "token-salah"), http.StatusForbidden)
+	if n := countUsers(t, pool, "carol"); n != 0 {
 		t.Fatalf("POST tanpa CSRF valid tidak boleh membuat user (n=%d)", n)
 	}
 
-	expectStatus(t, b.post("/admin/users", form(token)), http.StatusSeeOther, "/admin/users")
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM users WHERE username = 'carol'`).Scan(&n); err != nil || n != 1 {
+	expectStatus(t, b.send(http.MethodPost, "/api/admin/users", body, token), http.StatusCreated)
+	if n := countUsers(t, pool, "carol"); n != 1 {
 		t.Fatalf("POST dengan CSRF valid harus membuat user (n=%d)", n)
 	}
 }
@@ -263,7 +303,7 @@ func TestFlow_Logout(t *testing.T) {
 	cookie, token := testutil.LoginSessionCSRF(t, pool, admin)
 	b := newBrowser(t, app, cookie)
 
-	expectStatus(t, b.post("/logout", url.Values{csrf.FormField: {token}}), http.StatusSeeOther, "/login")
+	expectStatus(t, b.send(http.MethodPost, "/api/auth/logout", nil, token), http.StatusNoContent)
 	if b.sessionToken() != "" {
 		t.Fatal("logout harus menghapus cookie")
 	}
@@ -273,7 +313,24 @@ func TestFlow_Logout(t *testing.T) {
 
 	// Cookie lama dipakai ulang (mis. dicuri sebelum logout) → sudah tidak berlaku.
 	stolen := newBrowser(t, app, cookie)
-	expectStatus(t, stolen.get("/admin/users"), http.StatusSeeOther, "/login")
+	expectStatus(t, stolen.get("/api/admin/users"), http.StatusUnauthorized)
+}
+
+func TestFlow_LegacyFormLogoutStillWorks(t *testing.T) {
+	// Halaman HTML lama (explorer/migration) masih memakai form POST /logout.
+	pool := testutil.NewPlatformDB(t)
+	admin := testutil.CreateUser(t, pool, "admin", true)
+	cookie, token := testutil.LoginSessionCSRF(t, pool, admin)
+	b := newBrowser(t, newApp(t, pool), cookie)
+
+	rec := b.send(http.MethodPost, "/logout", nil, token)
+	expectStatus(t, rec, http.StatusSeeOther)
+	if rec.Header().Get("Location") != "/login" {
+		t.Fatalf("location = %q", rec.Header().Get("Location"))
+	}
+	if revoked, _ := revokedSessions(t, pool, admin); revoked != 1 {
+		t.Fatal("logout form harus mencabut session")
+	}
 }
 
 func TestFlow_DeactivateKillsSession(t *testing.T) {
@@ -285,17 +342,16 @@ func TestFlow_DeactivateKillsSession(t *testing.T) {
 	adminCookie, token := testutil.LoginSessionCSRF(t, pool, admin)
 	adminB := newBrowser(t, app, adminCookie)
 	bobB := newBrowser(t, app, testutil.LoginSession(t, pool, bob))
-	expectStatus(t, bobB.get("/admin/users"), http.StatusOK, "")
+	expectStatus(t, bobB.get("/api/admin/users"), http.StatusOK)
 
-	// Checkbox is_active tidak dikirim → bob dinonaktifkan (is_admin tetap).
-	path := fmt.Sprintf("/admin/users/%d/edit", bob)
-	expectStatus(t, adminB.post(path, url.Values{csrf.FormField: {token}, "is_admin": {"1"}}), http.StatusSeeOther, path)
+	path := fmt.Sprintf("/api/admin/users/%d", bob)
+	expectStatus(t, adminB.send(http.MethodPut, path, map[string]bool{"is_admin": true, "is_active": false}, token), http.StatusNoContent)
 
 	if revoked, total := revokedSessions(t, pool, bob); revoked != total || total != 1 {
 		t.Fatalf("session bob revoked=%d total=%d, want semua dicabut (D7)", revoked, total)
 	}
-	expectStatus(t, bobB.get("/admin/users"), http.StatusSeeOther, "/login")
-	expectStatus(t, newBrowser(t, app).formLogin("bob", testutil.TestPassword), http.StatusUnauthorized, "")
+	expectStatus(t, bobB.get("/api/admin/users"), http.StatusUnauthorized)
+	expectStatus(t, newBrowser(t, app).apiLogin("bob", testutil.TestPassword), http.StatusUnauthorized)
 }
 
 func TestFlow_DemoteAdminKillsSession(t *testing.T) {
@@ -307,10 +363,10 @@ func TestFlow_DemoteAdminKillsSession(t *testing.T) {
 	adminCookie, token := testutil.LoginSessionCSRF(t, pool, admin)
 	bobB := newBrowser(t, app, testutil.LoginSession(t, pool, bob))
 
-	path := fmt.Sprintf("/admin/users/%d/edit", bob)
-	expectStatus(t, newBrowser(t, app, adminCookie).post(path, url.Values{csrf.FormField: {token}, "is_active": {"1"}}),
-		http.StatusSeeOther, path)
-	expectStatus(t, bobB.get("/admin/users"), http.StatusSeeOther, "/login")
+	path := fmt.Sprintf("/api/admin/users/%d", bob)
+	expectStatus(t, newBrowser(t, app, adminCookie).send(http.MethodPut, path, map[string]bool{"is_admin": false, "is_active": true}, token),
+		http.StatusNoContent)
+	expectStatus(t, bobB.get("/api/admin/users"), http.StatusUnauthorized)
 }
 
 func TestFlow_SelfLockoutRejected(t *testing.T) {
@@ -319,9 +375,9 @@ func TestFlow_SelfLockoutRejected(t *testing.T) {
 	cookie, token := testutil.LoginSessionCSRF(t, pool, admin)
 	b := newBrowser(t, newApp(t, pool), cookie)
 
-	path := fmt.Sprintf("/admin/users/%d/edit", admin)
-	b.post(path, url.Values{csrf.FormField: {token}})
-	expectStatus(t, b.get("/admin/users"), http.StatusOK, "") // masih admin & masih login
+	path := fmt.Sprintf("/api/admin/users/%d", admin)
+	expectStatus(t, b.send(http.MethodPut, path, map[string]bool{"is_admin": false, "is_active": false}, token), http.StatusConflict)
+	expectStatus(t, b.get("/api/admin/users"), http.StatusOK) // masih admin & masih login
 }
 
 func TestFlow_PrivilegeGainRotatesSession(t *testing.T) {
@@ -336,27 +392,25 @@ func TestFlow_PrivilegeGainRotatesSession(t *testing.T) {
 	bobB := newBrowser(t, app, testutil.LoginSession(t, pool, bob))
 
 	before := bobB.sessionToken()
-	bobB.get("/login")
+	expectStatus(t, bobB.get("/api/me"), http.StatusOK)
 	if bobB.sessionToken() != before {
 		t.Fatal("tanpa perubahan privilege tidak boleh rotasi")
 	}
 
 	// Masuk group → privilege_version++ → request bob berikutnya dirotasi (D6).
-	expectStatus(t, adminB.post(fmt.Sprintf("/admin/groups/%d/members", g), url.Values{
-		csrf.FormField: {token}, "user_id": {fmt.Sprint(bob)},
-	}), http.StatusSeeOther, fmt.Sprintf("/admin/groups/%d", g))
-	bobB.get("/login")
+	expectStatus(t, adminB.send(http.MethodPost, fmt.Sprintf("/api/admin/groups/%d/members", g), map[string]int64{"user_id": bob}, token),
+		http.StatusNoContent)
+	expectStatus(t, bobB.get("/api/me"), http.StatusOK)
 	afterGroup := bobB.sessionToken()
 	if afterGroup == before || afterGroup == "" {
 		t.Fatal("masuk group harus memicu rotasi session")
 	}
 
-	// Dijadikan admin → rotasi lagi, dan halaman admin langsung bisa dibuka.
-	expectStatus(t, bobB.get("/admin/users"), http.StatusForbidden, "")
-	path := fmt.Sprintf("/admin/users/%d/edit", bob)
-	expectStatus(t, adminB.post(path, url.Values{csrf.FormField: {token}, "is_admin": {"1"}, "is_active": {"1"}}),
-		http.StatusSeeOther, path)
-	expectStatus(t, bobB.get("/admin/users"), http.StatusOK, "")
+	// Dijadikan admin → rotasi lagi, dan endpoint admin langsung bisa dibuka.
+	expectStatus(t, bobB.get("/api/admin/users"), http.StatusForbidden)
+	path := fmt.Sprintf("/api/admin/users/%d", bob)
+	expectStatus(t, adminB.send(http.MethodPut, path, map[string]bool{"is_admin": true, "is_active": true}, token), http.StatusNoContent)
+	expectStatus(t, bobB.get("/api/admin/users"), http.StatusOK)
 	if bobB.sessionToken() == afterGroup {
 		t.Fatal("dijadikan admin harus memicu rotasi session")
 	}
