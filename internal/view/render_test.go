@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
 	"github.com/ucupsss/Tubes-WBD-K02-14/web"
 )
 
@@ -97,16 +96,6 @@ func TestRender_Pages(t *testing.T) {
 		}
 	})
 
-	t.Run("database list", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		v.Render(rec, req, http.StatusOK, "admin/databases/index.html", PageData{
-			Title: "Kelola Target Database",
-			Data:  map[string]any{"Connections": []dbconn.Connection{}},
-		})
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Daftar Target Database") {
-			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-		}
-	})
 }
 
 func TestStaticFiles(t *testing.T) {

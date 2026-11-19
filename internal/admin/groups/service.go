@@ -3,8 +3,10 @@ package groups
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 )
 
@@ -83,8 +85,57 @@ func (s *Service) AddMember(ctx context.Context, groupID, userID int64) error {
 
 // RemoveMember mengeluarkan user dari group. Privilege turun, jadi tidak ada bump.
 func (s *Service) RemoveMember(ctx context.Context, groupID, userID int64) error {
+	g, err := s.repo.Get(ctx, s.db, groupID)
+	if err != nil {
+		return err
+	}
+	if g.LeaderID != nil && *g.LeaderID == userID {
+		return ErrIsLeader
+	}
+	return s.repo.RemoveMember(ctx, s.db, groupID, userID)
+}
+
+// SetLeader menetapkan leader group (userID nil = mengosongkan). Leader harus anggota aktif group (D28).
+// Selama group tanpa leader, pengajuan migration tetap pending; approval lama dari leader sebelumnya
+// dicabut oleh revalidasi worker (D40).
+func (s *Service) SetLeader(ctx context.Context, groupID int64, userID *int64) error {
 	if _, err := s.repo.Get(ctx, s.db, groupID); err != nil {
 		return err
 	}
-	return s.repo.RemoveMember(ctx, s.db, groupID, userID)
+	if userID != nil {
+		ok, err := s.repo.IsMember(ctx, s.db, groupID, *userID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrLeaderNotMember
+		}
+	}
+	if err := s.repo.SetLeader(ctx, s.db, groupID, userID); err != nil {
+		return err
+	}
+	attrs := []slog.Attr{slog.Int64("group_id", groupID)}
+	if userID != nil {
+		attrs = append(attrs, slog.Int64("leader_id", *userID))
+	}
+	logx.Audit(ctx, "group.leader_set", attrs...)
+	return nil
+}
+
+// LedGroupNames dipakai modul user: user yang masih leader tidak boleh dinonaktifkan (D28).
+func (s *Service) LedGroupNames(ctx context.Context, userID int64) ([]string, error) {
+	refs, err := s.repo.LedGroups(ctx, s.db, userID)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(refs))
+	for i, g := range refs {
+		names[i] = g.Name
+	}
+	return names, nil
+}
+
+// LedGroups dipakai GET /api/me untuk tahu group mana yang boleh di-approve oleh user.
+func (s *Service) LedGroups(ctx context.Context, userID int64) ([]Ref, error) {
+	return s.repo.LedGroups(ctx, s.db, userID)
 }

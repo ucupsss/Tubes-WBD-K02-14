@@ -6,9 +6,9 @@ type LoginMiddleware interface {
 	RequireLogin(next http.Handler) http.Handler
 }
 
-// RegisterRoutes mendaftarkan login & logout. /login publik; /logout butuh session.
+// RegisterRoutes mendaftarkan logout bentuk form untuk halaman HTML lama (explorer/migration) yang belum
+// dipindah ke SPA. Login dan logout SPA ada di internal/api (POST /api/auth/login, /api/auth/logout).
+// Hapus package ini dari wiring setelah seluruh halaman HTML dipindah.
 func RegisterRoutes(mux *http.ServeMux, h *Handler, mw LoginMiddleware) {
-	mux.HandleFunc("GET /login", h.ShowLogin)
-	mux.HandleFunc("POST /login", h.Login)
 	mux.Handle("POST /logout", mw.RequireLogin(http.HandlerFunc(h.Logout)))
 }

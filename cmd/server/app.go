@@ -10,7 +10,9 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/groups"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/users"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/api"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/approval"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/clock"
@@ -20,8 +22,10 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/explain"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/explorer"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/session"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/spa"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
@@ -32,7 +36,7 @@ type app struct {
 }
 
 // newApp wires every module and the middleware chain:
-// Logger → Recover → MaxBytes → session.Load → csrf.Verify → mux (authz.Protect per route).
+// Correlation → Logger → Recover → MaxBytes → session.Load → csrf.Verify → mux (authz.Protect per route).
 func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Logger) (*app, error) {
 	views, err := view.NewFromFS(webFS)
 	if err != nil {
@@ -68,22 +72,36 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("GET /static/", http.FileServerFS(webFS))
-	// Path yang tidak cocok dengan route mana pun memakai halaman error yang sama (bukan teks bawaan ServeMux).
+	// Path yang tidak cocok dengan route server mana pun: API → 404 JSON; selain itu dijawab SPA (router
+	// di browser yang menangani /login, /admin/..., dst.). Bila frontend belum di-build → halaman error bawaan.
+	spaHandler := spa.New(webFS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if !httpx.IsAPI(r) && spaHandler.Serve(w, r) {
+			return
+		}
 		httpx.HandleError(w, r, views, apperr.NotFound("Halaman tidak ditemukan"))
 	})
 
+	groupsSvc := groups.NewService(pool, groups.NewPgRepo(), bumper)
+	usersSvc := users.NewService(pool, users.NewPgRepo(), authSvc, sessMgr).WithLeaderGuard(groupsSvc)
+	databasesSvc := databases.NewService(pool, dbRepo, conns, cfg.SecretKey)
+	accessSvc := access.NewService(pool, access.NewPgRepo(), bumper)
+	// Selama modul execution milik C belum ada, approve/reject mengembalikan 409 executions_unavailable.
+	approvalSvc := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), approval.UnavailableExecutions{})
+
+	api.New(api.Deps{
+		Auth: authSvc, Sessions: sessMgr, Users: usersSvc, Groups: groupsSvc, Access: accessSvc,
+		Databases: databasesSvc, Approval: approvalSvc, Authz: az, Logger: logger,
+	}).RegisterRoutes(mux, mw)
+
 	auth.RegisterRoutes(mux, auth.NewHandler(authSvc, sessMgr, views, logger), mw)
-	users.RegisterRoutes(mux, users.NewHandler(users.NewService(pool, users.NewPgRepo(), authSvc, sessMgr), views), mw)
-	groups.RegisterRoutes(mux, groups.NewHandler(groups.NewService(pool, groups.NewPgRepo(), bumper), views), mw)
-	databases.RegisterRoutes(mux, databases.NewHandler(databases.NewService(pool, dbRepo, conns, cfg.SecretKey), views), mw)
-	access.RegisterRoutes(mux, access.NewHandler(access.NewService(pool, access.NewPgRepo(), bumper), views), mw)
 	explorer.RegisterRoutes(mux, explorer.NewHandler(explorer.NewService(conns, az, explorer.NewPgRepo(), getter), views), mw)
 	migSvc := migration.NewService(pool, migration.NewPgRepo(), conns, clk)
 	migration.RegisterRoutes(mux, migration.NewHandler(migSvc, views, az), mw)
 	explain.RegisterRoutes(mux, explain.NewHandler(migSvc, explain.NewAnalyzer(conns), views), mw)
 
 	handler := httpx.Chain(mux,
+		logx.CorrelationMiddleware,
 		httpx.Logger(logger),
 		httpx.Recover(logger),
 		httpx.MaxBytes(httpx.MaxBodyBytes),

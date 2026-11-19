@@ -144,6 +144,30 @@ func (r *stubRepo) RemoveMember(ctx context.Context, db platformdb.DBTX, gid, ui
 	return nil
 }
 
+func (r *stubRepo) IsMember(ctx context.Context, db platformdb.DBTX, gid, uid int64) (bool, error) {
+	return r.members[membership{gid, uid}], nil
+}
+
+func (r *stubRepo) SetLeader(ctx context.Context, db platformdb.DBTX, gid int64, uid *int64) error {
+	g, ok := r.groups[gid]
+	if !ok {
+		return groups.ErrNotFound
+	}
+	g.LeaderID = uid
+	r.groups[gid] = g
+	return nil
+}
+
+func (r *stubRepo) LedGroups(ctx context.Context, db platformdb.DBTX, uid int64) ([]groups.Ref, error) {
+	var refs []groups.Ref
+	for _, g := range r.groups {
+		if g.LeaderID != nil && *g.LeaderID == uid {
+			refs = append(refs, groups.Ref{ID: g.ID, Name: g.Name})
+		}
+	}
+	return refs, nil
+}
+
 type stubBumper struct {
 	users  []int64
 	groups []int64
@@ -327,5 +351,74 @@ func TestService_Detail(t *testing.T) {
 	}
 	if _, err := svc.Detail(context.Background(), 999); !errors.Is(err, groups.ErrNotFound) {
 		t.Fatalf("group tidak ada: err = %v", err)
+	}
+}
+
+func TestService_SetLeader(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("anggota boleh jadi leader", func(t *testing.T) {
+		repo := newStubRepo()
+		svc, _ := newService(repo)
+		if err := svc.AddMember(ctx, groupID, bobID); err != nil {
+			t.Fatal(err)
+		}
+		uid := bobID
+		if err := svc.SetLeader(ctx, groupID, &uid); err != nil {
+			t.Fatalf("SetLeader: %v", err)
+		}
+		g, _ := svc.Get(ctx, groupID)
+		if g.LeaderID == nil || *g.LeaderID != bobID {
+			t.Fatalf("leader = %v", g.LeaderID)
+		}
+	})
+
+	t.Run("bukan anggota ditolak", func(t *testing.T) {
+		svc, _ := newService(newStubRepo())
+		uid := carolID
+		err := svc.SetLeader(ctx, groupID, &uid)
+		if !errors.Is(err, groups.ErrLeaderNotMember) {
+			t.Fatalf("err = %v, want ErrLeaderNotMember", err)
+		}
+	})
+
+	t.Run("group tidak ada", func(t *testing.T) {
+		svc, _ := newService(newStubRepo())
+		uid := bobID
+		if err := svc.SetLeader(ctx, 999, &uid); !errors.Is(err, groups.ErrNotFound) {
+			t.Fatalf("err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("leader dikosongkan", func(t *testing.T) {
+		repo := newStubRepo()
+		svc, _ := newService(repo)
+		_ = svc.AddMember(ctx, groupID, bobID)
+		uid := bobID
+		_ = svc.SetLeader(ctx, groupID, &uid)
+		if err := svc.SetLeader(ctx, groupID, nil); err != nil {
+			t.Fatalf("SetLeader(nil): %v", err)
+		}
+		g, _ := svc.Get(ctx, groupID)
+		if g.LeaderID != nil {
+			t.Fatalf("leader masih %v", *g.LeaderID)
+		}
+	})
+}
+
+func TestService_RemoveMember_LeaderBlocked(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newService(newStubRepo())
+	_ = svc.AddMember(ctx, groupID, bobID)
+	uid := bobID
+	_ = svc.SetLeader(ctx, groupID, &uid)
+
+	if err := svc.RemoveMember(ctx, groupID, bobID); !errors.Is(err, groups.ErrIsLeader) {
+		t.Fatalf("err = %v, want ErrIsLeader", err)
+	}
+	// Setelah leader diganti (dikosongkan), boleh dikeluarkan.
+	_ = svc.SetLeader(ctx, groupID, nil)
+	if err := svc.RemoveMember(ctx, groupID, bobID); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
 	}
 }

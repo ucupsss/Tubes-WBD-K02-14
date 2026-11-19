@@ -21,6 +21,12 @@ type Repo interface {
 	// AddMember mengembalikan added=false bila user sudah menjadi anggota.
 	AddMember(ctx context.Context, db platformdb.DBTX, groupID, userID int64) (added bool, err error)
 	RemoveMember(ctx context.Context, db platformdb.DBTX, groupID, userID int64) error
+	// IsMember melaporkan apakah user anggota group.
+	IsMember(ctx context.Context, db platformdb.DBTX, groupID, userID int64) (bool, error)
+	// SetLeader menetapkan leader group; userID nil menghapus leader.
+	SetLeader(ctx context.Context, db platformdb.DBTX, groupID int64, userID *int64) error
+	// LedGroups mengembalikan group yang dipimpin user (kosong bila bukan leader).
+	LedGroups(ctx context.Context, db platformdb.DBTX, userID int64) ([]Ref, error)
 }
 
 type PgRepo struct{}
@@ -44,12 +50,14 @@ func pgCode(err error) string {
 
 const groupSelect = `
 	SELECT g.id, g.name, g.description, g.created_at,
-	       (SELECT count(*) FROM group_members gm WHERE gm.group_id = g.id)
+	       (SELECT count(*) FROM group_members gm WHERE gm.group_id = g.id),
+	       g.leader_id,
+	       COALESCE((SELECT u.username FROM users u WHERE u.id = g.leader_id), '')
 	FROM groups g`
 
 func scanGroup(row pgx.Row) (Group, error) {
 	var g Group
-	err := row.Scan(&g.ID, &g.Name, &g.Description, &g.CreatedAt, &g.MemberCount)
+	err := row.Scan(&g.ID, &g.Name, &g.Description, &g.CreatedAt, &g.MemberCount, &g.LeaderID, &g.LeaderName)
 	return g, err
 }
 
@@ -128,9 +136,10 @@ func (r *PgRepo) Delete(ctx context.Context, db platformdb.DBTX, id int64) error
 
 func (r *PgRepo) ListMembers(ctx context.Context, db platformdb.DBTX, groupID int64) ([]Member, error) {
 	const q = `
-		SELECT u.id, u.username, u.is_active
+		SELECT u.id, u.username, u.is_active, (g.leader_id = u.id)
 		FROM group_members gm
 		JOIN users u ON u.id = gm.user_id
+		JOIN groups g ON g.id = gm.group_id
 		WHERE gm.group_id = $1
 		ORDER BY u.username`
 	rows, err := db.Query(ctx, q, groupID)
@@ -142,9 +151,11 @@ func (r *PgRepo) ListMembers(ctx context.Context, db platformdb.DBTX, groupID in
 	var result []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Username, &m.IsActive); err != nil {
+		var leader *bool
+		if err := rows.Scan(&m.UserID, &m.Username, &m.IsActive, &leader); err != nil {
 			return nil, fmt.Errorf("groups.ListMembers scan: %w", err)
 		}
+		m.IsLeader = leader != nil && *leader
 		result = append(result, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -200,4 +211,45 @@ func (r *PgRepo) RemoveMember(ctx context.Context, db platformdb.DBTX, groupID, 
 		return fmt.Errorf("groups.RemoveMember: %w", err)
 	}
 	return nil
+}
+
+func (r *PgRepo) IsMember(ctx context.Context, db platformdb.DBTX, groupID, userID int64) (bool, error) {
+	var ok bool
+	err := db.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM group_members gm JOIN users u ON u.id = gm.user_id
+		                WHERE gm.group_id = $1 AND gm.user_id = $2 AND u.is_active)`,
+		groupID, userID,
+	).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("groups.IsMember: %w", err)
+	}
+	return ok, nil
+}
+
+func (r *PgRepo) SetLeader(ctx context.Context, db platformdb.DBTX, groupID int64, userID *int64) error {
+	tag, err := db.Exec(ctx, `UPDATE groups SET leader_id = $2 WHERE id = $1`, groupID, userID)
+	if err != nil {
+		return fmt.Errorf("groups.SetLeader: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PgRepo) LedGroups(ctx context.Context, db platformdb.DBTX, userID int64) ([]Ref, error) {
+	rows, err := db.Query(ctx, `SELECT id, name FROM groups WHERE leader_id = $1 ORDER BY name`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("groups.LedGroups: %w", err)
+	}
+	defer rows.Close()
+	var refs []Ref
+	for rows.Next() {
+		var g Ref
+		if err := rows.Scan(&g.ID, &g.Name); err != nil {
+			return nil, fmt.Errorf("groups.LedGroups scan: %w", err)
+		}
+		refs = append(refs, g)
+	}
+	return refs, rows.Err()
 }

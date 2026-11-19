@@ -26,6 +26,16 @@ var policy = map[Action]Requirement{
 	ActMigrationExecute: {MinLevel: LevelEdit},
 	ActMigrationDelete:  {MinLevel: LevelEdit},
 	ActMigrationExplain: {MinLevel: LevelEdit}, // EXPLAIN ANALYZE benar-benar mengeksekusi statement
+
+	ActMigrationSubmit:   {MinLevel: LevelEdit},
+	ActMigrationRollback: {MinLevel: LevelEdit},
+	ActMigrationRun:      {MinLevel: LevelEdit},
+	ActMigrationResume:   {MinLevel: LevelEdit},
+	ActMigrationCancel:   {MinLevel: LevelEdit},
+
+	// Hanya perlu login; service approval memeriksa bahwa pemanggil adalah leader group yang relevan.
+	ActApprovalView:   {},
+	ActApprovalDecide: {},
 }
 
 // RequirementFor mengembalikan syarat sebuah aksi. ok=false berarti aksi tidak dikenal (deny).

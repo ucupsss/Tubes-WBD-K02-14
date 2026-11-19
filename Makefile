@@ -1,4 +1,4 @@
-.PHONY: up down db-reset run seed fmt lint test test-integration check cover
+.PHONY: up down db-reset run seed fmt lint test test-integration check cover web-install web-dev web-build web-lint web-test web-check
 
 up:
 	docker compose up -d
@@ -32,3 +32,21 @@ check: lint test-integration
 
 cover:
 	go test -tags=integration -coverprofile=coverage.out ./... && go tool cover -html=coverage.out
+
+# Frontend SPA (frontend/). Hasil build ditulis ke web/dist lalu di-embed ke binary Go.
+web-install:
+	cd frontend && npm install
+
+web-dev:
+	cd frontend && npm run dev
+
+web-build:
+	cd frontend && npm run build
+
+web-lint:
+	cd frontend && npm run lint
+
+web-test:
+	cd frontend && npm test
+
+web-check: web-lint web-test web-build

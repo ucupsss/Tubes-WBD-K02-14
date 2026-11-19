@@ -25,6 +25,10 @@ func PathInt64(r *http.Request, name string) (int64, error) {
 // When the view has templates, the shared error page is rendered. Otherwise the
 // status is written as plain text so callers with view.New() still observe the code.
 func HandleError(w http.ResponseWriter, r *http.Request, v *view.View, err error) {
+	if IsAPI(r) {
+		WriteError(w, r, err)
+		return
+	}
 	kind := apperr.KindOf(err)
 	status := http.StatusInternalServerError
 	msg := "Terjadi kesalahan pada server"
