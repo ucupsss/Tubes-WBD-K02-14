@@ -14,15 +14,19 @@ Login → Access Control → Pilih Database → Lihat Schema/Data
 
 ## Menjalankan
 
-Butuh Go 1.24+, Docker Desktop, dan `make` (Git Bash). Pastikan port di bawah tidak sedang dipakai Postgres lokal atau container lain.
+Butuh Go 1.24+, Node.js 20+ (untuk frontend), Docker Desktop, dan `make` (Git Bash). Pastikan port di bawah tidak sedang dipakai Postgres lokal atau container lain.
 
 ```bash
 cp .env.example .env
 # isi APP_SECRET_KEY (openssl rand -base64 32) dan BOOTSTRAP_ADMIN_PASSWORD
 make up
+make web-install  # sekali saja: dependensi frontend
+make web-build    # membangun SPA ke web/dist (di-embed ke binary Go)
 make run          # http://localhost:8080
 make seed         # user, group, koneksi, dan grant untuk demo
 ```
+
+Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-dev` di terminal lain, lalu buka `http://localhost:5173` (Vite meneruskan `/api` ke server Go, jadi tidak perlu CORS).
 
 `make run` menjalankan migrasi platform secara otomatis. Jika ada file migrasi baru yang nomornya lebih kecil dari yang sudah diterapkan, jalankan `make db-reset`.
 
@@ -30,6 +34,7 @@ make seed         # user, group, koneksi, dan grant untuk demo
 |-------------------------|---------------------------------------------------------------------------|
 | `make up` / `make down` | Menyalakan / mematikan Postgres                                           |
 | `make db-reset`         | Menghapus volume lalu menyalakan ulang dari kosong                        |
+| `make web-check`        | Frontend: type-check, unit test, dan build                                |
 | `make test`             | Unit test                                                                 |
 | `make test-integration` | Unit test + integration test (butuh `make up` dan `TEST_DATABASE_URL`)    |
 | `make check`            | `lint` + integration test. Wajib lolos sebelum membuka PR                 |
@@ -76,6 +81,12 @@ Password koneksi target di seed hanya untuk demo lokal.
 | D18 | Menghapus group ikut menghapus keanggotaan dan grant group tersebut (`ON DELETE CASCADE`). |
 | D19 | Explorer menampilkan semua schema kecuali `pg_catalog`, `information_schema`, dan `_dbmp` (tabel internal platform). Data ditampilkan 50 baris per halaman (maksimal 200) dan diurutkan berdasarkan primary key bila ada. |
 | D20 | Analisis EXPLAIN hanya untuk migration `draft` atau `failed` dan butuh akses edit, karena `EXPLAIN ANALYZE` benar-benar mengeksekusi statement. Detailnya ada di bagian [Analisis EXPLAIN](#analisis-explain). |
+| D21 | Frontend adalah Single-Page Application: React 18 + Vite + TypeScript + React Router + TanStack Query, folder `frontend/`. Hasil build ada di `web/dist` dan disajikan server Go (`internal/spa`). Path yang bukan route server dan bukan file dijawab `index.html` supaya router SPA menanganinya; file ber-ekstensi yang tidak ada tetap 404 (HTML tidak menyamar sebagai JS/CSS). |
+| D22 | API berformat JSON di bawah `/api`, memakai cookie session yang sama. Mutasi wajib membawa header `X-CSRF-Token`: token session dari `GET /api/me`, atau token pre-login dari `GET /api/csrf` (double-submit cookie). Error berbentuk `{"error":{"code","message","details"}}`; request tanpa login ke `/api` dijawab 401 JSON, bukan redirect. |
+| D27 | Setiap perubahan database (apply, forward, rollback) butuh approval dari leader **setiap** group yang punya grant view atau edit ke database tersebut. Satu baris approval per (execution, ronde, group). Satu **reject** menolak seluruh execution. |
+| D28 | Leader group (`groups.leader_id`) harus anggota aktif group. Leader tidak bisa dikeluarkan dari group atau dinonaktifkan sebelum diganti. Leader boleh meng-approve perubahan yang ia ajukan sendiri, dan satu keputusan mewakili semua group yang ia pimpin. Group tanpa leader **tidak menolak** pengajuan: execution tetap menunggu sampai leader ditetapkan. Platform Admin tidak otomatis boleh approve (konsisten dengan D2). |
+| D40 | Approval dicek ulang dari grant dan leader **saat ini** sebelum job berjalan. Bila ada group baru yang punya akses atau leader berganti, approval dicabut dan execution kembali ke `pending_review` pada ronde berikutnya (bukan `failed`). Approval tidak perlu diulang untuk retry otomatis dan resume dari checkpoint. |
+| D41 | Audit log berupa event log terstruktur `audit.*` ke stdout, tidak disimpan di database platform. Riwayat migration di database tidak terpengaruh filter tampilan apa pun. |
 
 ### Kode status di halaman error
 
@@ -128,6 +139,43 @@ Aturan aksi hanya didefinisikan di satu tempat: `internal/authz/policy.go`. Aksi
 | analisis EXPLAIN (`POST .../migrations/{id}/explain`)   | edit             |
 
 Menyembunyikan tombol di antarmuka bukan otorisasi; setiap aksi dicek ulang di backend.
+
+## Frontend (SPA) dan API
+
+Seluruh halaman login dan administrasi (user, group, leader, akses database, koneksi database, inbox approval, dashboard) ada di SPA. Halaman explorer dan migration masih dilayani template HTML sampai dipindah ke SPA, dan dashboard SPA menautkannya dengan navigasi biasa.
+
+- **Responsif**: navigasi menjadi menu hamburger di layar sempit, tabel menjadi kartu bertumpuk di mobile, tabel lebar scroll di dalam komponennya (bukan di halaman), dan semua kontrol berukuran minimal 44 px. Diuji pada lebar 360 px dan 1280 px.
+- **Satu pintu ke backend**: semua request lewat `apiFetch` (`frontend/src/api/client.ts`) yang memasang token CSRF, menyeragamkan error, dan mengosongkan sesi saat server menjawab 401.
+- **Format error API**:
+
+| HTTP | `code`                         | Arti |
+|------|--------------------------------|------|
+| 400  | `invalid`                      | Input tidak valid; `details.fields` berisi pesan per field |
+| 401  | `unauthenticated`, `invalid_credentials` | Belum login atau session habis; kredensial salah (pesan sengaja generik) |
+| 403  | `forbidden`                    | Tidak berhak, termasuk token CSRF salah dan ID database yang tidak ada (D15) |
+| 404  | `not_found`                    | Data atau path tidak ada |
+| 409  | `conflict`                     | Bentrok aturan; `details.reason` berisi kode mesin (mis. `is_leader`, `leader_not_member`) |
+| 502  | `target_unavailable`           | Database target tidak dapat dihubungi |
+| 500  | `internal`                     | Kesalahan server; detail hanya ada di log, tidak pernah di respons |
+
+- **Endpoint** (semua JSON): `GET /api/csrf`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/me`; `GET|POST /api/admin/users`, `GET|PUT /api/admin/users/{id}`, `POST /api/admin/users/{id}/password`; `GET|POST /api/admin/groups`, `GET|PUT|DELETE /api/admin/groups/{id}`, `POST /api/admin/groups/{id}/members`, `DELETE /api/admin/groups/{id}/members/{userID}`, `PUT /api/admin/groups/{id}/leader`, `GET|PUT /api/admin/groups/{id}/access`; `GET|POST /api/admin/databases`, `GET|PUT|DELETE /api/admin/databases/{id}`, `POST /api/admin/databases/test`, `POST /api/admin/databases/{id}/test`; `GET /api/approvals`, `POST /api/executions/{id}/approve|reject`; `GET /api/databases` (dashboard).
+
+## Approval dan leader
+
+Leader ditetapkan Platform Admin di halaman detail group. Saat sebuah execution diajukan, sistem membuat satu baris approval untuk tiap group yang punya akses ke database itu. Leader melihat antreannya di menu **Approval** (`GET /api/approvals`) dan memutuskan lewat `POST /api/executions/{id}/approve|reject`. Execution baru bisa lanjut ke antrean setelah semua group menyetujui; pengguna yang mengajukan lalu menekan tombol Jalankan (tidak otomatis).
+
+Paket `internal/approval` tidak mengubah status execution sendiri: ia memanggil interface `Executions` yang diimplementasikan modul execution, dan menyediakan `OpenRound`, `Verify`, dan `Revoke` untuk worker (revalidasi, D40).
+
+## Log terstruktur
+
+Seluruh log aplikasi berupa satu baris JSON ke stdout (`internal/logx`). Pesan menjadi field `event`; `correlation_id` dibaca dari header `X-Correlation-Id` (bila valid) atau dibuat server, dikirim balik di header respons, dan ikut di semua log request; `actor` terisi setelah session dikenali. Nilai sensitif (password, token, session, cookie, CSRF, DSN) diganti `[REDACTED]`, dan nilai string dipotong 256 karakter. Contoh keluaran nyata:
+
+```json
+{"time":"2026-11-17T18:56:17.5052763+07:00","level":"INFO","event":"auth.login","user_id":1,"status":"ok","correlation_id":"demo-corr-1"}
+{"time":"2026-11-17T18:56:17.5968612+07:00","level":"INFO","event":"http.request","method":"GET","path":"/api/me","status":200,"duration_ms":4,"correlation_id":"f254b3df5b4051ea16b24520ecbec15b","actor":"admin"}
+```
+
+Helper `logx.SQL` mencatat satu eksekusi SQL (query, parameter yang disamarkan, durasi, jumlah row, SQLSTATE), dan `logx.Audit` mencatat event `audit.*`. Atribut `trace_id` dan `span_id` terisi otomatis begitu paket tracing mendaftarkan pembacanya lewat `logx.SetTraceExtractor`.
 
 ## Migration
 
@@ -182,14 +230,19 @@ internal/auth       login, password, bootstrap admin
 internal/session    session: idle, absolute, rotasi, grace
 internal/csrf       proteksi CSRF
 internal/authz      policy dan akses efektif
-internal/admin      user, group, koneksi database, grant akses
+internal/admin      user, group (termasuk leader), koneksi database, grant akses
+internal/approval   approval perubahan oleh leader group
+internal/api        endpoint JSON (/api) untuk auth, admin, dan approval
+internal/logx       log JSON terstruktur, redaksi, correlation ID, audit
+internal/spa        penyaji hasil build frontend
+frontend            SPA (React + Vite + TypeScript)
 internal/dbconn     koneksi, enkripsi kredensial, pool
 internal/explorer   viewer schema dan data
 internal/migration  editor, eksekusi, riwayat
 internal/explain    analisis EXPLAIN / EXPLAIN ANALYZE
 internal/config platformdb apperr clock httpx view testutil
 db/platform_migrations
-web/templates web/static
+web/dist (hasil build SPA) web/templates web/static (halaman HTML lama)
 ```
 
 ## Pembagian kerja
