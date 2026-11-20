@@ -34,6 +34,14 @@ func (s *Service) GetDashboard(ctx context.Context, userID int64) ([]authz.Datab
 	return dbs, nil
 }
 
+// EffectiveLevel mengambil level akses efektif pengguna pada database tertentu.
+func (s *Service) EffectiveLevel(ctx context.Context, userID, dbID int64) (authz.Level, error) {
+	if s.authz == nil {
+		return authz.LevelView, nil
+	}
+	return s.authz.EffectiveLevel(ctx, userID, dbID)
+}
+
 // GetDatabaseInfo mengambil detail koneksi target database untuk judul & breadcrumb.
 func (s *Service) GetDatabaseInfo(ctx context.Context, dbID int64) (dbconn.Connection, error) {
 	if s.connGetter == nil {

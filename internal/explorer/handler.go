@@ -1,136 +1,182 @@
 package explorer
 
 import (
-	"fmt"
 	"net/http"
+	"strconv"
 
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 )
 
+// Handler menangani endpoint REST JSON untuk Dashboard & Database Explorer (Milestone 2, B3).
 type Handler struct {
-	svc  *Service
-	view *view.View
+	svc *Service
 }
 
-func NewHandler(svc *Service, v *view.View) *Handler {
-	return &Handler{svc: svc, view: v}
+// NewHandler membuat Handler JSON Explorer baru.
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
 }
 
-// Dashboard menangani GET / — Menampilkan seluruh database yang dapat diakses pengguna.
-func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
+// ListDatabases menangani GET /api/databases — Mengembalikan daftar seluruh database yang boleh diakses pengguna beserta level efektifnya.
+func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
 	p, ok := authz.PrincipalFrom(r.Context())
 	if !ok {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		httpx.WriteError(w, r, apperr.Unauthenticated("Silakan login terlebih dahulu"))
 		return
 	}
 
 	dbs, err := h.svc.GetDashboard(r.Context(), p.UserID)
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 
-	h.view.Render(w, r, http.StatusOK, "dashboard/index.html", view.PageData{
-		Title:     "Workspace Database",
-		Principal: &p,
-		Data: map[string]any{
-			"Databases": dbs,
-		},
-	})
+	type item struct {
+		ID    int64  `json:"id"`
+		Name  string `json:"name"`
+		Level string `json:"level"`
+	}
+	items := make([]item, len(dbs))
+	for i, d := range dbs {
+		items[i] = item{
+			ID:    d.DatabaseID,
+			Name:  d.Name,
+			Level: d.Level.String(),
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-// Overview menangani GET /db/{dbID} — Menampilkan daftar skema dan tabel pengguna.
-func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
+// Schema menangani GET /api/databases/{dbID}/schema — Mengembalikan info database, level akses, dan katalog tabel/view.
+func (h *Handler) Schema(w http.ResponseWriter, r *http.Request) {
 	p, _ := authz.PrincipalFrom(r.Context())
 	dbID, err := httpx.PathInt64(r, "dbID")
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
+	ctx := logx.WithDatabase(r.Context(), strconv.FormatInt(dbID, 10))
 
-	dbInfo, _ := h.svc.GetDatabaseInfo(r.Context(), dbID)
-	tables, err := h.svc.ListTables(r.Context(), dbID)
+	dbInfo, _ := h.svc.GetDatabaseInfo(ctx, dbID)
+	level, _ := h.svc.EffectiveLevel(ctx, p.UserID, dbID)
+
+	tables, err := h.svc.ListTables(ctx, dbID)
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
+	if tables == nil {
+		tables = []TableSummary{}
+	}
 
-	h.view.Render(w, r, http.StatusOK, "explorer/overview.html", view.PageData{
-		Title:     fmt.Sprintf("%s · Katalog Tabel", dbInfo.Name),
-		Principal: &p,
-		Data: map[string]any{
-			"Database": dbInfo,
-			"Tables":   tables,
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"database": map[string]any{
+			"id":      dbInfo.ID,
+			"name":    dbInfo.Name,
+			"host":    dbInfo.Host,
+			"port":    dbInfo.Port,
+			"db_name": dbInfo.DBName,
+			"level":   level.String(),
 		},
+		"tables": tables,
 	})
 }
 
-// TableDetails menangani GET /db/{dbID}/tables/{schema}/{table} — Menampilkan metadata kolom, constraints, dan indeks.
+// TableDetails menangani GET /api/databases/{dbID}/tables/{schema}/{table} — Mengembalikan metadata kolom, constraints, dan indeks.
 func (h *Handler) TableDetails(w http.ResponseWriter, r *http.Request) {
 	p, _ := authz.PrincipalFrom(r.Context())
 	dbID, err := httpx.PathInt64(r, "dbID")
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
-
 	schema := r.PathValue("schema")
 	table := r.PathValue("table")
 	if schema == "" || table == "" {
-		httpx.HandleError(w, r, h.view, ErrTableNotFound)
+		httpx.WriteError(w, r, ErrTableNotFound)
 		return
 	}
+	ctx := logx.WithDatabase(r.Context(), strconv.FormatInt(dbID, 10))
 
-	dbInfo, _ := h.svc.GetDatabaseInfo(r.Context(), dbID)
-	meta, err := h.svc.GetTableMetadata(r.Context(), dbID, schema, table)
+	dbInfo, _ := h.svc.GetDatabaseInfo(ctx, dbID)
+	level, _ := h.svc.EffectiveLevel(ctx, p.UserID, dbID)
+	meta, err := h.svc.GetTableMetadata(ctx, dbID, schema, table)
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
+	if meta.Columns == nil {
+		meta.Columns = []ColumnInfo{}
+	}
+	if meta.Constraints == nil {
+		meta.Constraints = []ConstraintInfo{}
+	}
+	if meta.Indexes == nil {
+		meta.Indexes = []IndexInfo{}
+	}
 
-	h.view.Render(w, r, http.StatusOK, "explorer/table.html", view.PageData{
-		Title:     fmt.Sprintf("%s.%s · Metadata Skema", schema, table),
-		Principal: &p,
-		Data: map[string]any{
-			"Database": dbInfo,
-			"Metadata": meta,
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"database": map[string]any{
+			"id":    dbInfo.ID,
+			"name":  dbInfo.Name,
+			"level": level.String(),
 		},
+		"metadata": meta,
 	})
 }
 
-// TableData menangani GET /db/{dbID}/tables/{schema}/{table}/data — Menampilkan isi data baris berpaginasi.
+// TableData menangani GET /api/databases/{dbID}/tables/{schema}/{table}/data — Mengembalikan data baris berpaginasi.
 func (h *Handler) TableData(w http.ResponseWriter, r *http.Request) {
 	p, _ := authz.PrincipalFrom(r.Context())
 	dbID, err := httpx.PathInt64(r, "dbID")
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
-
 	schema := r.PathValue("schema")
 	table := r.PathValue("table")
 	if schema == "" || table == "" {
-		httpx.HandleError(w, r, h.view, ErrTableNotFound)
+		httpx.WriteError(w, r, ErrTableNotFound)
 		return
 	}
+	ctx := logx.WithDatabase(r.Context(), strconv.FormatInt(dbID, 10))
 
-	pg := ParsePagination(r.URL.Query().Get("page"), r.URL.Query().Get("size"))
-	dbInfo, _ := h.svc.GetDatabaseInfo(r.Context(), dbID)
+	sizeStr := r.URL.Query().Get("page_size")
+	if sizeStr == "" {
+		sizeStr = r.URL.Query().Get("size")
+	}
+	pg := ParsePagination(r.URL.Query().Get("page"), sizeStr)
 
-	dataPage, err := h.svc.GetTableData(r.Context(), dbID, schema, table, pg.Page, pg.Size)
+	dbInfo, _ := h.svc.GetDatabaseInfo(ctx, dbID)
+	level, _ := h.svc.EffectiveLevel(ctx, p.UserID, dbID)
+	dataPage, err := h.svc.GetTableData(ctx, dbID, schema, table, pg.Page, pg.Size)
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
+	if dataPage.Columns == nil {
+		dataPage.Columns = []string{}
+	}
+	if dataPage.Rows == nil {
+		dataPage.Rows = [][]string{}
+	}
+	if dataPage.PKColumns == nil {
+		dataPage.PKColumns = []string{}
+	}
 
-	h.view.Render(w, r, http.StatusOK, "explorer/data.html", view.PageData{
-		Title:     fmt.Sprintf("%s.%s · Penampil Data", schema, table),
-		Principal: &p,
-		Data: map[string]any{
-			"Database": dbInfo,
-			"DataPage": dataPage,
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"database": map[string]any{
+			"id":    dbInfo.ID,
+			"name":  dbInfo.Name,
+			"level": level.String(),
 		},
+		"data_page": dataPage,
+		"items":     dataPage.Rows,
+		"page":      dataPage.Page,
+		"page_size": dataPage.Size,
+		"total":     dataPage.TotalRows,
 	})
 }

@@ -11,13 +11,10 @@ type AuthorizerMiddleware interface {
 	RequireLogin(next http.Handler) http.Handler
 }
 
-// RegisterRoutes mendaftarkan seluruh route untuk Dashboard dan Database Explorer.
+// RegisterRoutes mendaftarkan seluruh endpoint REST JSON untuk Dashboard dan Database Explorer (Milestone 2, B3).
 func RegisterRoutes(mux *http.ServeMux, h *Handler, mw AuthorizerMiddleware) {
-	// Dashboard user (daftar database yang berhak diakses)
-	// Dashboard (GET /) kini halaman SPA; handler HTML Dashboard dihapus oleh B saat API explorer selesai.
-
-	// Explorer target database (membutuhkan minimal hak level view)
-	mux.Handle("GET /db/{dbID}", mw.Protect(authz.ActDBView, h.Overview))
-	mux.Handle("GET /db/{dbID}/tables/{schema}/{table}", mw.Protect(authz.ActDBView, h.TableDetails))
-	mux.Handle("GET /db/{dbID}/tables/{schema}/{table}/data", mw.Protect(authz.ActDBView, h.TableData))
+	mux.Handle("GET /api/databases", mw.RequireLogin(http.HandlerFunc(h.ListDatabases)))
+	mux.Handle("GET /api/databases/{dbID}/schema", mw.Protect(authz.ActDBView, h.Schema))
+	mux.Handle("GET /api/databases/{dbID}/tables/{schema}/{table}", mw.Protect(authz.ActDBView, h.TableDetails))
+	mux.Handle("GET /api/databases/{dbID}/tables/{schema}/{table}/data", mw.Protect(authz.ActDBView, h.TableData))
 }

@@ -12,67 +12,67 @@ const (
 	MisestimateFactor = 10.0
 )
 
-var ErrNotAnalyzable = apperr.Conflict("Hanya migration draft atau gagal yang dapat dianalisis")
+var ErrNotAnalyzable = apperr.Conflict("Hanya migration draft atau gagal yang dapat dianalisis").WithReason("not_analyzable")
 
 // Node adalah satu node execution plan beserta anak-anaknya.
 type Node struct {
-	NodeType      string
-	Operation     string // Insert/Update/Delete/Merge pada node ModifyTable
-	RelationName  string
-	Schema        string
-	Alias         string
-	IndexName     string
-	JoinType      string
-	Strategy      string
-	ScanDirection string
-	Condition     string // Index Cond / Hash Cond / Merge Cond / Join Filter / Filter, yang pertama ada
+	NodeType      string `json:"node_type"`
+	Operation     string `json:"operation,omitempty"` // Insert/Update/Delete/Merge pada node ModifyTable
+	RelationName  string `json:"relation_name,omitempty"`
+	Schema        string `json:"schema,omitempty"`
+	Alias         string `json:"alias,omitempty"`
+	IndexName     string `json:"index_name,omitempty"`
+	JoinType      string `json:"join_type,omitempty"`
+	Strategy      string `json:"strategy,omitempty"`
+	ScanDirection string `json:"scan_direction,omitempty"`
+	Condition     string `json:"condition,omitempty"` // Index Cond / Hash Cond / Merge Cond / Join Filter / Filter, yang pertama ada
 
-	StartupCost float64
-	TotalCost   float64
-	PlanRows    float64
-	PlanWidth   int
+	StartupCost float64 `json:"startup_cost"`
+	TotalCost   float64 `json:"total_cost"`
+	PlanRows    float64 `json:"plan_rows"`
+	PlanWidth   int     `json:"plan_width"`
 
 	// Terisi hanya untuk EXPLAIN ANALYZE.
-	ActualStartupTime float64
-	ActualTotalTime   float64
-	ActualRows        float64
-	ActualLoops       float64
-	RowsRemoved       float64
+	ActualStartupTime float64 `json:"actual_startup_time"`
+	ActualTotalTime   float64 `json:"actual_total_time"`
+	ActualRows        float64 `json:"actual_rows"`
+	ActualLoops       float64 `json:"actual_loops"`
+	RowsRemoved       float64 `json:"rows_removed"`
 
 	// Turunan, dihitung oleh annotate.
-	ExclusiveMS   float64 // waktu node sendiri (tanpa anak), dikali loops
-	Slow          bool
-	Misestimated  bool
-	EstimateRatio float64 // aktual / estimasi (≥ 1 berarti estimasi terlalu kecil)
+	ExclusiveMS   float64 `json:"exclusive_ms"` // waktu node sendiri (tanpa anak), dikali loops
+	Slow          bool    `json:"slow"`
+	Misestimated  bool    `json:"misestimated"`
+	EstimateRatio float64 `json:"estimate_ratio"` // aktual / estimasi (≥ 1 berarti estimasi terlalu kecil)
 
-	Children []Node
+	Children []Node `json:"children,omitempty"`
 }
 
 // Plan adalah hasil EXPLAIN satu statement.
 type Plan struct {
-	Root         Node
-	PlanningMS   float64
-	ExecutionMS  float64
-	Analyzed     bool
-	SlowNodes    int
-	Misestimates int
-	ScanSummary  []string // mis. "Seq Scan on orders", "Index Scan using idx_x on orders"
-	JoinSummary  []string // mis. "Hash Join (Inner)"
+	Root         Node     `json:"root"`
+	PlanningMS   float64  `json:"planning_ms"`
+	ExecutionMS  float64  `json:"execution_ms"`
+	Analyzed     bool     `json:"analyzed"`
+	SlowNodes    int      `json:"slow_nodes"`
+	Misestimates int      `json:"misestimates"`
+	ScanSummary  []string `json:"scan_summary"` // mis. "Seq Scan on orders", "Index Scan using idx_x on orders"
+	JoinSummary  []string `json:"join_summary"` // mis. "Hash Join (Inner)"
 }
 
 // StatementResult adalah hasil analisis satu statement dalam script migration.
 type StatementResult struct {
-	Index int
-	SQL   string
-	Kind  string
-	Plan  *Plan  // nil bila statement tidak punya plan (DDL) atau gagal
-	Note  string // penjelasan untuk statement tanpa plan
-	Error string // pesan error Postgres (aman ditampilkan)
+	Index int    `json:"index"`
+	SQL   string `json:"sql"`
+	Kind  string `json:"kind"`
+	Plan  *Plan  `json:"plan,omitempty"`  // nil bila statement tidak punya plan (DDL) atau gagal
+	Note  string `json:"note,omitempty"`  // penjelasan untuk statement tanpa plan
+	Error string `json:"error,omitempty"` // pesan error Postgres (aman ditampilkan)
 }
 
 // Report adalah hasil analisis seluruh script. Semua perubahan sudah di-rollback.
 type Report struct {
-	Analyze    bool
-	Statements []StatementResult
-	Failed     int
+	Analyze    bool              `json:"analyze"`
+	Statements []StatementResult `json:"statements"`
+	Failed     int               `json:"failed"`
 }

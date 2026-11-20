@@ -26,6 +26,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/session"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/spa"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
@@ -95,13 +96,14 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 	}).RegisterRoutes(mux, mw)
 
 	auth.RegisterRoutes(mux, auth.NewHandler(authSvc, sessMgr, views, logger), mw)
-	explorer.RegisterRoutes(mux, explorer.NewHandler(explorer.NewService(conns, az, explorer.NewPgRepo(), getter), views), mw)
+	explorer.RegisterRoutes(mux, explorer.NewHandler(explorer.NewService(conns, az, explorer.NewPgRepo(), getter)), mw)
 	migSvc := migration.NewService(pool, migration.NewPgRepo(), conns, clk)
 	migration.RegisterRoutes(mux, migration.NewHandler(migSvc, views, az), mw)
-	explain.RegisterRoutes(mux, explain.NewHandler(migSvc, explain.NewAnalyzer(conns), views), mw)
+	explain.RegisterRoutes(mux, explain.NewHandler(migSvc, explain.NewAnalyzer(conns)), mw)
 
 	handler := httpx.Chain(mux,
 		logx.CorrelationMiddleware,
+		telemetry.HTTPMiddleware,
 		httpx.Logger(logger),
 		httpx.Recover(logger),
 		httpx.MaxBytes(httpx.MaxBodyBytes),

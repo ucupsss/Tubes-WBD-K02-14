@@ -58,7 +58,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mw Middleware) {
 	mux.HandleFunc("POST /api/auth/login", h.Login)
 	mux.Handle("POST /api/auth/logout", mw.RequireLogin(http.HandlerFunc(h.Logout)))
 	mux.Handle("GET /api/me", mw.RequireLogin(http.HandlerFunc(h.Me)))
-	mux.Handle("GET /api/databases", mw.RequireLogin(http.HandlerFunc(h.ListAccessibleDatabases))) // sementara, lihat dashboard.go
 
 	// Admin: user.
 	mux.Handle("GET /api/admin/users", mw.Protect(authz.ActAdminManageUsers, h.ListUsers))

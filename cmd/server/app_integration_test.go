@@ -271,7 +271,7 @@ func TestApp_PublicRoutes(t *testing.T) {
 	expect(t, b.get("/static/css/app.css"), http.StatusOK, "")
 
 	// Halaman SPA: path klien dijawab index.html (guard login ada di router SPA, bukan di server).
-	for _, p := range []string{"/", "/login", "/approvals", "/admin/users", "/admin/groups/3", "/admin/databases"} {
+	for _, p := range []string{"/", "/login", "/approvals", "/admin/users", "/admin/groups/3", "/admin/databases", "/db/1", "/db/1/tables/public/customers", "/db/1/tables/public/customers/data", "/db/1/executions", "/executions/1"} {
 		rec := b.get(p)
 		expect(t, rec, http.StatusOK, "")
 		expectBody(t, rec, `id="root"`)
@@ -293,8 +293,8 @@ func TestApp_PublicRoutes(t *testing.T) {
 	expect(t, rec, http.StatusUnauthorized, "")
 	expectBody(t, rec, `"unauthenticated"`)
 
-	// Halaman HTML lama (explorer/migration) tetap mengarahkan ke /login yang kini milik SPA.
-	for _, p := range []string{"/db/1", "/db/1/migrations"} {
+	// Halaman HTML lama (migration) tetap mengarahkan ke /login yang kini milik SPA.
+	for _, p := range []string{"/db/1/migrations"} {
 		expect(t, b.get(p), http.StatusSeeOther, "/login")
 	}
 }
@@ -334,9 +334,9 @@ func TestApp_SpecFlow(t *testing.T) {
 	expect(t, admin.api(http.MethodPut, accessPath, grant("view")), http.StatusNoContent, "")
 
 	// Admin tidak otomatis punya akses ke database (D2).
-	expect(t, admin.get(fmt.Sprintf("/db/%d", dbID)), http.StatusForbidden, "")
+	expect(t, admin.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/schema", dbID), nil), http.StatusForbidden, "")
 
-	// 3. Bob login, memilih database dari dashboard, melihat schema & data.
+	// 3. Bob login, memilih database dari dashboard, melihat schema & data lewat API JSON (B3).
 	bob := newBrowser(t, e.app)
 	expect(t, bob.login("bob", testutil.TestPassword), http.StatusOK, "")
 	dash := bob.api(http.MethodGet, "/api/databases", nil)
@@ -344,20 +344,20 @@ func TestApp_SpecFlow(t *testing.T) {
 	expectBody(t, dash, "target-test", fmt.Sprintf(`"id":%d`, dbID), `"level":"view"`)
 	expect(t, bob.api(http.MethodGet, "/api/admin/users", nil), http.StatusForbidden, "")
 
-	// D15: ID database tak ada tidak dibedakan dari tak berhak; halaman error memuat kode dan penjelasan.
-	forbidden := bob.get("/db/999999")
+	// D15: ID database tak ada tidak dibedakan dari tak berhak; halaman error / API error mengembalikan 403.
+	forbidden := bob.api(http.MethodGet, "/api/databases/999999/schema", nil)
 	expect(t, forbidden, http.StatusForbidden, "")
-	expectBody(t, forbidden, `class="error-code">403<`, "Akses Ditolak", "Hubungi Platform Admin")
+	expectBody(t, forbidden, `"forbidden"`)
 
-	expectBody(t, bob.get(fmt.Sprintf("/db/%d", dbID)), "customers")
-	detail := bob.get(fmt.Sprintf("/db/%d/tables/public/customers", dbID))
+	expectBody(t, bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/schema", dbID), nil), "customers")
+	detail := bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/tables/public/customers", dbID), nil)
 	expect(t, detail, http.StatusOK, "")
 	expectBody(t, detail, "email", "idx_customers_name", "customers_pkey")
-	data := bob.get(fmt.Sprintf("/db/%d/tables/public/customers/data", dbID))
+	data := bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/tables/public/customers/data", dbID), nil)
 	expect(t, data, http.StatusOK, "")
 	expectBody(t, data, "a@x.test", "Budi")
-	expect(t, bob.get(fmt.Sprintf("/db/%d/tables/public/tidak_ada", dbID)), http.StatusNotFound, "")
-	expect(t, bob.get(fmt.Sprintf("/db/%d/tables/public/customers%%3B%%20DROP%%20TABLE%%20customers/data", dbID)), http.StatusNotFound, "")
+	expect(t, bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/tables/public/tidak_ada", dbID), nil), http.StatusNotFound, "")
+	expect(t, bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/tables/public/customers%%3B%%20DROP%%20TABLE%%20customers/data", dbID), nil), http.StatusNotFound, "")
 
 	// View Only: bisa melihat riwayat migration, tidak bisa membuat.
 	migPath := fmt.Sprintf("/db/%d/migrations", dbID)
@@ -476,8 +476,9 @@ func TestApp_UnavailableTarget(t *testing.T) {
 
 	bob := newBrowser(t, e.app)
 	bob.login("bob", testutil.TestPassword)
-	rec := bob.get(fmt.Sprintf("/db/%d", dbID))
+	rec := bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/schema", dbID), nil)
 	expect(t, rec, http.StatusBadGateway, "")
+	expectBody(t, rec, `"target_unavailable"`)
 	if pw, _ := conn["password"].(string); pw != "" && strings.Contains(rec.Body.String(), pw) {
 		t.Fatal("pesan error tidak boleh memuat password koneksi")
 	}
@@ -497,13 +498,13 @@ func TestApp_Explain(t *testing.T) {
 	migID := testutil.CreateDraft(t, e.pool, dbID, bobID,
 		"CREATE TABLE t (id INT); INSERT INTO t VALUES (1); SELECT * FROM customers WHERE email = 'a@x.test'")
 	detail := fmt.Sprintf("/db/%d/migrations/%d", dbID, migID)
+	explainAPI := fmt.Sprintf("/api/databases/%d/migrations/%d/explain", dbID, migID)
 
 	bob := newBrowser(t, e.app)
 	bob.login("bob", testutil.TestPassword)
-	expectBody(t, bob.get(detail), "/explain", `name="analyze"`)
-	rec := bob.post(detail+"/explain", url.Values{"analyze": {"1"}})
+	rec := bob.api(http.MethodPost, explainAPI, map[string]bool{"analyze": true})
 	expect(t, rec, http.StatusOK, "")
-	expectBody(t, rec, "Hasil Analisis (EXPLAIN ANALYZE)", "ModifyTable", "(Insert)", "customers_email_key", "Execution time", "di-rollback")
+	expectBody(t, rec, `"analyze":true`, "ModifyTable", "Insert", "customers_email_key", "di-rollback")
 	if n := scalar[int](t, e.target, `SELECT count(*) FROM information_schema.tables WHERE table_name = 't'`); n != 0 {
 		t.Fatal("analisis tidak boleh meninggalkan table t di target")
 	}
@@ -511,17 +512,13 @@ func TestApp_Explain(t *testing.T) {
 		t.Fatalf("analisis tidak boleh mengubah status migration, got %s", s)
 	}
 
-	// View Only: tidak melihat tombol dan ditolak di backend.
+	// View Only: ditolak di backend.
 	carol := newBrowser(t, e.app)
 	carol.login("carol", testutil.TestPassword)
-	if strings.Contains(carol.get(detail).Body.String(), "/explain") {
-		t.Fatal("user view tidak boleh melihat tombol Analisis")
-	}
-	expect(t, carol.post(detail+"/explain", url.Values{}), http.StatusForbidden, "")
+	expect(t, carol.api(http.MethodPost, explainAPI, map[string]bool{"analyze": false}), http.StatusForbidden, "")
 
 	// Migration yang sudah success tidak dianalisis ulang.
 	bob.get(detail)
 	expect(t, bob.post(detail+"/execute", nil), http.StatusSeeOther, "")
-	bob.get(detail)
-	expect(t, bob.post(detail+"/explain", url.Values{}), http.StatusConflict, "")
+	expect(t, bob.api(http.MethodPost, explainAPI, map[string]bool{"analyze": false}), http.StatusConflict, "")
 }

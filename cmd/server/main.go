@@ -12,6 +12,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/config"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 	"github.com/ucupsss/Tubes-WBD-K02-14/web"
 )
 
@@ -21,6 +22,15 @@ func main() {
 	slog.SetDefault(logger)
 
 	ctx := context.Background()
+	shutdownTelemetry, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName: "dbmp-server",
+		Disabled:    os.Getenv("OTEL_TRACES_EXPORTER") == "none",
+	})
+	if err != nil {
+		logger.Error("telemetry init", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = shutdownTelemetry(ctx) }()
 	if err := platformdb.Migrate(cfg.PlatformDatabaseURL, db.PlatformMigrations); err != nil {
 		logger.Error("platform migrate", "err", err)
 		os.Exit(1)

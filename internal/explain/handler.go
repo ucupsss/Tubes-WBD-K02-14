@@ -4,74 +4,92 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
-// Migrations adalah bagian migration.Service yang dibutuhkan halaman analisis.
+// Migrations adalah bagian migration.Service yang dibutuhkan untuk analisis EXPLAIN.
 type Migrations interface {
 	Get(ctx context.Context, dbID, id int64) (migration.Migration, []migration.Run, error)
 }
 
+// Handler menangani endpoint REST JSON untuk analisis EXPLAIN / EXPLAIN ANALYZE (Milestone 2, B3).
 type Handler struct {
 	migs     Migrations
 	analyzer *Analyzer
-	view     *view.View
 }
 
-func NewHandler(migs Migrations, analyzer *Analyzer, v *view.View) *Handler {
-	return &Handler{migs: migs, analyzer: analyzer, view: v}
+// NewHandler membuat Handler JSON Explain baru.
+func NewHandler(migs Migrations, analyzer *Analyzer) *Handler {
+	return &Handler{migs: migs, analyzer: analyzer}
 }
 
-// Explain menganalisis SQL migration draft/gagal lalu menampilkan plan di halaman detail migration.
-// Route ini sudah dijaga Protect(ActMigrationExplain), yang mensyaratkan akses edit.
+type explainRequest struct {
+	Analyze bool `json:"analyze"`
+}
+
+// Explain menangani POST /api/databases/{dbID}/migrations/{id}/explain.
+// Menerima JSON {"analyze": bool} (atau body kosong = analyze false), menjalankan EXPLAIN di dalam
+// transaksi yang selalu di-rollback, lalu mengembalikan Report JSON.
 func (h *Handler) Explain(w http.ResponseWriter, r *http.Request) {
 	dbID, err := httpx.PathInt64(r, "dbID")
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	id, err := httpx.PathInt64(r, "id")
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
-	m, runs, err := h.migs.Get(r.Context(), dbID, id)
+	ctx := logx.WithDatabase(r.Context(), strconv.FormatInt(dbID, 10))
+
+	var req explainRequest
+	if r.ContentLength > 0 {
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+	} else if r.PostFormValue("analyze") != "" || r.URL.Query().Get("analyze") == "true" || r.URL.Query().Get("analyze") == "1" {
+		req.Analyze = true
+	}
+
+	m, _, err := h.migs.Get(ctx, dbID, id)
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
 	if m.Status != migration.StatusDraft && m.Status != migration.StatusFailed {
-		httpx.HandleError(w, r, h.view, ErrNotAnalyzable)
+		httpx.WriteError(w, r, ErrNotAnalyzable)
 		return
 	}
 
-	analyze := r.PostFormValue("analyze") != ""
 	start := time.Now()
-	report, err := h.analyzer.Analyze(r.Context(), dbID, m.SQLText, analyze)
+	report, err := h.analyzer.Analyze(ctx, dbID, m.SQLText, req.Analyze)
 	if err != nil {
-		httpx.HandleError(w, r, h.view, err)
+		httpx.WriteError(w, r, err)
 		return
 	}
-	p, _ := authz.PrincipalFrom(r.Context())
-	slog.Info("migration explained", // SQL tidak di-log
-		"user_id", p.UserID, "db_id", dbID, "migration_id", id,
-		"analyze", analyze, "statements", len(report.Statements), "failed", report.Failed,
+	if report.Statements == nil {
+		report.Statements = []StatementResult{}
+	}
+
+	p, _ := authz.PrincipalFrom(ctx)
+	slog.InfoContext(ctx, "migration.explained",
+		"user_id", p.UserID,
+		"db_id", dbID,
+		"migration_id", id,
+		"analyze", req.Analyze,
+		"statements", len(report.Statements),
+		"failed", report.Failed,
 		"duration_ms", time.Since(start).Milliseconds(),
+		"status", "ok",
 	)
 
-	h.view.Render(w, r, http.StatusOK, "migration/detail.html", view.PageData{
-		Title: "Analisis: " + m.Title,
-		Data: migration.DetailPage{
-			Migration: m,
-			Runs:      runs,
-			CanEdit:   true,
-			ShowPlan:  true,
-			Plans:     report,
-		},
-	})
+	httpx.WriteJSON(w, http.StatusOK, report)
 }
