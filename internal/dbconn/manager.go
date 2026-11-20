@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 )
 
 // ConnectionGetter mendefinisikan interface minimal untuk mengambil detail koneksi dari repo.
@@ -92,6 +93,7 @@ func (m *DefaultManager) Pool(ctx context.Context, dbID int64) (*pgxpool.Pool, e
 	cfg.MinConns = 1
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
+	cfg.ConnConfig.Tracer = telemetry.PgxTracer()
 
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()

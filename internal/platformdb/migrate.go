@@ -10,11 +10,17 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 )
 
 // Open creates a platform database pool and checks that it answers.
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("platformdb.Open parse: %w", err)
+	}
+	cfg.ConnConfig.Tracer = telemetry.PgxTracer()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("platformdb.Open: %w", err)
 	}
