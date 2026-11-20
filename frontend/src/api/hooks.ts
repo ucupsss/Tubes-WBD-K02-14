@@ -6,16 +6,30 @@ import type {
   Connection,
   ConnectionInput,
   DatabaseGrant,
+  ExecutionDetailResponse,
+  ExecutionItem,
+  ExplainReport,
   Group,
   GroupDetail,
   Items,
+  JobStatusResponse,
   PendingApproval,
+  SchemaOverview,
+  TableDataResponse,
+  TableMetadataResponse,
   TestResult,
 } from './types'
 
 export const keys = {
   me: ['me'] as const,
   databases: ['databases'] as const,
+  schema: (dbId: number) => ['databases', dbId, 'schema'] as const,
+  tableMeta: (dbId: number, schema: string, table: string) => ['databases', dbId, 'tables', schema, table] as const,
+  tableData: (dbId: number, schema: string, table: string, page: number, pageSize: number) =>
+    ['databases', dbId, 'tables', schema, table, 'data', page, pageSize] as const,
+  executions: (dbId: number, hideRollback: boolean) => ['databases', dbId, 'executions', hideRollback] as const,
+  execution: (execId: number) => ['executions', execId] as const,
+  job: (jobId: number) => ['jobs', jobId] as const,
   users: ['admin', 'users'] as const,
   groups: ['admin', 'groups'] as const,
   group: (id: number) => ['admin', 'groups', id] as const,
@@ -27,6 +41,74 @@ export const keys = {
 
 export const useAccessibleDatabases = () =>
   useQuery({ queryKey: keys.databases, queryFn: () => api.get<Items<AccessibleDatabase>>('/api/databases') })
+
+// --- Explorer & Explain (B3, B4) ---
+export const useDatabaseSchema = (dbId: number) =>
+  useQuery({
+    queryKey: keys.schema(dbId),
+    queryFn: () => api.get<SchemaOverview>(`/api/databases/${dbId}/schema`),
+    enabled: Number.isFinite(dbId) && dbId > 0,
+  })
+
+export const useTableMetadata = (dbId: number, schema: string, table: string) =>
+  useQuery({
+    queryKey: keys.tableMeta(dbId, schema, table),
+    queryFn: () =>
+      api.get<TableMetadataResponse>(
+        `/api/databases/${dbId}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}`,
+      ),
+    enabled: Number.isFinite(dbId) && dbId > 0 && schema !== '' && table !== '',
+  })
+
+export const useTableData = (dbId: number, schema: string, table: string, page: number, pageSize = 50) =>
+  useQuery({
+    queryKey: keys.tableData(dbId, schema, table, page, pageSize),
+    queryFn: () =>
+      api.get<TableDataResponse>(
+        `/api/databases/${dbId}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/data?page=${page}&page_size=${pageSize}`,
+      ),
+    enabled: Number.isFinite(dbId) && dbId > 0 && schema !== '' && table !== '',
+  })
+
+export const runMigrationExplain = (dbId: number, migrationId: number, analyze: boolean) =>
+  api.post<ExplainReport>(`/api/databases/${dbId}/migrations/${migrationId}/explain`, { analyze })
+
+// --- Executions & Jobs (B5) ---
+export const useDatabaseExecutions = (dbId: number, hideRollback: boolean) =>
+  useQuery({
+    queryKey: keys.executions(dbId, hideRollback),
+    queryFn: () =>
+      api.get<Items<ExecutionItem>>(
+        `/api/databases/${dbId}/executions?hide_rollback=${hideRollback ? 'true' : 'false'}`,
+      ),
+    enabled: Number.isFinite(dbId) && dbId > 0,
+  })
+
+export const useExecutionDetail = (execId: number, pollMs?: number | false) =>
+  useQuery({
+    queryKey: keys.execution(execId),
+    queryFn: () => api.get<ExecutionDetailResponse>(`/api/executions/${execId}`),
+    enabled: Number.isFinite(execId) && execId > 0,
+    refetchInterval: pollMs || false,
+  })
+
+export const useJobStatus = (jobId: number | null, pollMs: number | false = 1500) =>
+  useQuery({
+    queryKey: keys.job(jobId ?? 0),
+    queryFn: () => api.get<JobStatusResponse>(`/api/jobs/${jobId}`),
+    enabled: jobId !== null && jobId > 0,
+    refetchInterval: query => {
+      const st = query.state.data?.status
+      const execSt = query.state.data?.execution_status
+      if (st === 'done' || st === 'dead') {
+        return false
+      }
+      if (execSt && !['queued', 'running', 'uncertain'].includes(execSt)) {
+        return false
+      }
+      return pollMs
+    },
+  })
 
 // --- Users ---
 export const useUsers = () =>
@@ -70,7 +152,7 @@ export const usePendingApprovals = () =>
  * Mutasi umum: jalankan fn, lalu batalkan cache query yang terkait supaya tampilan memuat ulang.
  * Error dilempar ke pemanggil (form menampilkannya per field).
  */
-export function useAction<TVars, TResult = void>(
+export function useAction<TVars = void, TResult = void>(
   fn: (vars: TVars) => Promise<TResult>,
   invalidate: QueryKey[] = [],
 ) {
