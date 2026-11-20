@@ -8,6 +8,11 @@ import { Users } from './pages/admin/Users'
 import { Inbox } from './pages/approvals/Inbox'
 import { Login } from './pages/auth/Login'
 import { Dashboard } from './pages/dashboard/Dashboard'
+import { ExecutionDetailPage } from './pages/executions/ExecutionDetail'
+import { ExecutionHistoryPage } from './pages/executions/ExecutionHistory'
+import { SchemaOverviewPage } from './pages/explorer/SchemaOverview'
+import { TableDataPage } from './pages/explorer/TableData'
+import { TableDetailPage } from './pages/explorer/TableDetail'
 
 function NotFound() {
   return (
@@ -35,6 +40,11 @@ export function App() {
       >
         <Route index element={<Dashboard />} />
         <Route path="approvals" element={<Inbox />} />
+        <Route path="db/:dbID" element={<SchemaOverviewPage />} />
+        <Route path="db/:dbID/tables/:schema/:table" element={<TableDetailPage />} />
+        <Route path="db/:dbID/tables/:schema/:table/data" element={<TableDataPage />} />
+        <Route path="db/:dbID/executions" element={<ExecutionHistoryPage />} />
+        <Route path="executions/:execID" element={<ExecutionDetailPage />} />
         <Route
           path="admin/users"
           element={

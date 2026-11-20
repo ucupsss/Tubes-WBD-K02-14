@@ -1,11 +1,11 @@
+import { Link } from 'react-router-dom'
 import { useAccessibleDatabases } from '../../api/hooks'
 import { Badge, PageHeader, QueryState, TableWrap } from '../../components/ui'
 import { useAuth } from '../../lib/auth'
 
 /**
  * Dashboard: database yang boleh diakses pengguna.
- * Halaman explorer dan migration masih dilayani server (template lama) sampai dipindah ke SPA,
- * sehingga tautan di sini memakai navigasi biasa (<a>), bukan router SPA.
+ * Halaman explorer dan riwayat eksekusi dilayani di dalam SPA.
  */
 export function Dashboard() {
   const { me } = useAuth()
@@ -44,11 +44,14 @@ export function Dashboard() {
                         <Badge tone={db.level === 'edit' ? 'ok' : 'info'}>{db.level === 'edit' ? 'view + edit' : 'view'}</Badge>
                       </td>
                       <td className="row-actions">
-                        <a className="btn btn-ghost" href={`/db/${db.id}`}>
-                          Schema
-                        </a>
+                        <Link className="btn btn-primary" to={`/db/${db.id}`}>
+                          Schema Explorer
+                        </Link>
+                        <Link className="btn btn-ghost" to={`/db/${db.id}/executions`}>
+                          Riwayat Eksekusi
+                        </Link>
                         <a className="btn btn-ghost" href={`/db/${db.id}/migrations`}>
-                          Migration
+                          Migrations
                         </a>
                       </td>
                     </tr>

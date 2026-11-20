@@ -516,28 +516,28 @@ tr:last-child td {
   }
 
   /* Tabel menjadi kartu bertumpuk: setiap sel diberi label dari atribut data-label. */
-  table,
-  thead,
-  tbody,
-  tr,
-  td {
+  table:not(.data-grid),
+  table:not(.data-grid) thead,
+  table:not(.data-grid) tbody,
+  table:not(.data-grid) tr,
+  table:not(.data-grid) td {
     display: block;
   }
-  thead {
+  table:not(.data-grid) thead {
     position: absolute;
     width: 1px;
     height: 1px;
     overflow: hidden;
     clip: rect(0 0 0 0);
   }
-  tr {
+  table:not(.data-grid) tr {
     padding: 8px 4px;
     border-bottom: 1px solid var(--border);
   }
-  tr:last-child {
+  table:not(.data-grid) tr:last-child {
     border-bottom: none;
   }
-  td {
+  table:not(.data-grid) td {
     border: none;
     padding: 6px 12px;
     display: flex;
@@ -545,19 +545,83 @@ tr:last-child td {
     gap: 12px;
     text-align: right;
   }
-  td[data-label]::before {
+  table:not(.data-grid) td[data-label]::before {
     content: attr(data-label);
     font-weight: 600;
     color: var(--muted);
     text-align: left;
   }
-  td.row-actions {
+  table:not(.data-grid) td.row-actions {
     justify-content: flex-start;
   }
   .detail-row td {
     display: block;
     text-align: left;
   }
+}
+
+/* ---- Explorer, EXPLAIN, & Execution UI (B4, B5) ---- */
+.breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+}
+.data-grid-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.data-grid th,
+.data-grid td {
+  white-space: nowrap;
+}
+.sql-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.875rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.plan-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+.plan-tree {
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  margin-top: 12px;
+}
+.plan-node {
+  padding: 6px 0;
+}
+.plan-node-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.plan-cond {
+  margin-top: 2px;
+}
+.job-monitor {
+  border-left: 4px solid var(--info);
 }
 
 @media (prefers-reduced-motion: reduce) {

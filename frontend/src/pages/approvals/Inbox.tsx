@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { api } from '../../api/client'
 import { keys, useAction, usePendingApprovals } from '../../api/hooks'
 import type { PendingApproval } from '../../api/types'
@@ -74,7 +75,11 @@ function Row({ item }: { item: PendingApproval }) {
 
   return (
     <tr>
-      <td data-label="Execution">#{item.execution_id}</td>
+      <td data-label="Execution">
+        <Link to={`/executions/${item.execution_id}`}>
+          <strong>#{item.execution_id}</strong>
+        </Link>
+      </td>
       <td data-label="Group">{item.group_name}</td>
       <td data-label="Diajukan">{formatDateTime(item.created_at)}</td>
       <td className="row-actions">
