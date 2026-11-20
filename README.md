@@ -85,6 +85,10 @@ Password koneksi target di seed hanya untuk demo lokal.
 | D22 | API berformat JSON di bawah `/api`, memakai cookie session yang sama. Mutasi wajib membawa header `X-CSRF-Token`: token session dari `GET /api/me`, atau token pre-login dari `GET /api/csrf` (double-submit cookie). Error berbentuk `{"error":{"code","message","details"}}`; request tanpa login ke `/api` dijawab 401 JSON, bukan redirect. |
 | D27 | Setiap perubahan database (apply, forward, rollback) butuh approval dari leader **setiap** group yang punya grant view atau edit ke database tersebut. Satu baris approval per (execution, ronde, group). Satu **reject** menolak seluruh execution. |
 | D28 | Leader group (`groups.leader_id`) harus anggota aktif group. Leader tidak bisa dikeluarkan dari group atau dinonaktifkan sebelum diganti. Leader boleh meng-approve perubahan yang ia ajukan sendiri, dan satu keputusan mewakili semua group yang ia pimpin. Group tanpa leader **tidak menolak** pengajuan: execution tetap menunggu sampai leader ditetapkan. Platform Admin tidak otomatis boleh approve (konsisten dengan D2). |
+| D33 | Filter **Hide rollback** di riwayat eksekusi menyembunyikan pasangan `(execution yang dibatalkan, rollback sukses yang membatalkannya)` berdasarkan **Execution ID** (`rolls_back_execution_id`), bukan nama migration. Eksekusi gagal dan rollback gagal selalu tetap tampil. Filter hanya mengubah tampilan dan tidak menghapus data. |
+| D36 | **Resume dan revert batch**: resume melanjutkan Execution ID yang sama dari checkpoint terakhir di `_dbmp.batch_checkpoints` tanpa mengulang batch yang sudah committed dan memakai approval yang sudah ada. Rollback pada eksekusi batch yang sudah committed (atau `partial`) menjalankan SQL down per batch yang sudah committed dalam **urutan terbalik** (`batch_no` terbesar ke terkecil). Bila revert gagal di tengah, status menjadi `partially_reverted` dan dapat di-resume dengan aturan yang sama. |
+| D37 | **Bukti eksekusi** disimpan di database target dalam transaction yang sama dengan perubahan: `_dbmp.executions` (mode biasa) dan `_dbmp.batch_checkpoints` (mode batch). Tabel `execution_batches` di database platform merupakan cermin untuk tampilan UI. |
+| D39 | **Mode batch**: migration mendefinisikan `batch_table`, `batch_column` (wajib bertipe integer di katalog target), dan `batch_size`. SQL up dan down wajib memuat placeholder `:from` (batas bawah eksklusif) dan `:to` (batas atas inklusif). Platform mencari batas atas tiap batch lewat query berbatas `LIMIT`, lalu mengganti `:from` dan `:to` dengan angka literal `int64` tanpa memuat seluruh dataset ke memori. |
 | D40 | Approval dicek ulang dari grant dan leader **saat ini** sebelum job berjalan. Bila ada group baru yang punya akses atau leader berganti, approval dicabut dan execution kembali ke `pending_review` pada ronde berikutnya (bukan `failed`). Approval tidak perlu diulang untuk retry otomatis dan resume dari checkpoint. |
 | D41 | Audit log berupa event log terstruktur `audit.*` ke stdout, tidak disimpan di database platform. Riwayat migration di database tidak terpengaruh filter tampilan apa pun. |
 
@@ -142,9 +146,9 @@ Menyembunyikan tombol di antarmuka bukan otorisasi; setiap aksi dicek ulang di b
 
 ## Frontend (SPA) dan API
 
-Seluruh halaman login dan administrasi (user, group, leader, akses database, koneksi database, inbox approval, dashboard) ada di SPA. Halaman explorer dan migration masih dilayani template HTML sampai dipindah ke SPA, dan dashboard SPA menautkannya dengan navigasi biasa.
+Seluruh halaman login, administrasi (user, group, leader, akses database, koneksi database), inbox approval, dashboard, **database explorer** (katalog skema, struktur tabel, data baris berpaginasi, analisis EXPLAIN), serta **eksekusi & riwayat migration** (monitor job asinkron, filter Hide rollback, detail execution, attempt, dan checkpoint batch) disajikan sebagai SPA.
 
-- **Responsif**: navigasi menjadi menu hamburger di layar sempit, tabel menjadi kartu bertumpuk di mobile, tabel lebar scroll di dalam komponennya (bukan di halaman), dan semua kontrol berukuran minimal 44 px. Diuji pada lebar 360 px dan 1280 px.
+- **Responsif**: navigasi menjadi menu hamburger di layar sempit, tabel menjadi kartu bertumpuk di mobile, tabel data lebar (`.data-grid-wrap`) scroll horizontal di dalam komponennya (bukan di halaman), dan semua kontrol berukuran minimal 44 px. Diuji pada lebar 360 px dan 1280 px.
 - **Satu pintu ke backend**: semua request lewat `apiFetch` (`frontend/src/api/client.ts`) yang memasang token CSRF, menyeragamkan error, dan mengosongkan sesi saat server menjawab 401.
 - **Format error API**:
 
@@ -154,11 +158,11 @@ Seluruh halaman login dan administrasi (user, group, leader, akses database, kon
 | 401  | `unauthenticated`, `invalid_credentials` | Belum login atau session habis; kredensial salah (pesan sengaja generik) |
 | 403  | `forbidden`                    | Tidak berhak, termasuk token CSRF salah dan ID database yang tidak ada (D15) |
 | 404  | `not_found`                    | Data atau path tidak ada |
-| 409  | `conflict`                     | Bentrok aturan; `details.reason` berisi kode mesin (mis. `is_leader`, `leader_not_member`) |
+| 409  | `conflict`                     | Bentrok aturan; `details.reason` berisi kode mesin (mis. `is_leader`, `leader_not_member`, `not_analyzable`) |
 | 502  | `target_unavailable`           | Database target tidak dapat dihubungi |
 | 500  | `internal`                     | Kesalahan server; detail hanya ada di log, tidak pernah di respons |
 
-- **Endpoint** (semua JSON): `GET /api/csrf`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/me`; `GET|POST /api/admin/users`, `GET|PUT /api/admin/users/{id}`, `POST /api/admin/users/{id}/password`; `GET|POST /api/admin/groups`, `GET|PUT|DELETE /api/admin/groups/{id}`, `POST /api/admin/groups/{id}/members`, `DELETE /api/admin/groups/{id}/members/{userID}`, `PUT /api/admin/groups/{id}/leader`, `GET|PUT /api/admin/groups/{id}/access`; `GET|POST /api/admin/databases`, `GET|PUT|DELETE /api/admin/databases/{id}`, `POST /api/admin/databases/test`, `POST /api/admin/databases/{id}/test`; `GET /api/approvals`, `POST /api/executions/{id}/approve|reject`; `GET /api/databases` (dashboard).
+- **Endpoint** (semua JSON): `GET /api/csrf`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/me`; `GET|POST /api/admin/users`, `GET|PUT /api/admin/users/{id}`, `POST /api/admin/users/{id}/password`; `GET|POST /api/admin/groups`, `GET|PUT|DELETE /api/admin/groups/{id}`, `POST /api/admin/groups/{id}/members`, `DELETE /api/admin/groups/{id}/members/{userID}`, `PUT /api/admin/groups/{id}/leader`, `GET|PUT /api/admin/groups/{id}/access`; `GET|POST /api/admin/databases`, `GET|PUT|DELETE /api/admin/databases/{id}`, `POST /api/admin/databases/test`, `POST /api/admin/databases/{id}/test`; `GET /api/approvals`, `POST /api/executions/{id}/approve|reject`; `GET /api/databases`, `GET /api/databases/{dbID}/schema`, `GET /api/databases/{dbID}/tables/{schema}/{table}`, `GET /api/databases/{dbID}/tables/{schema}/{table}/data?page=&page_size=`; `POST /api/databases/{dbID}/migrations/{id}/explain`.
 
 ## Approval dan leader
 
@@ -176,6 +180,76 @@ Seluruh log aplikasi berupa satu baris JSON ke stdout (`internal/logx`). Pesan m
 ```
 
 Helper `logx.SQL` mencatat satu eksekusi SQL (query, parameter yang disamarkan, durasi, jumlah row, SQLSTATE), dan `logx.Audit` mencatat event `audit.*`. Atribut `trace_id` dan `span_id` terisi otomatis begitu paket tracing mendaftarkan pembacanya lewat `logx.SetTraceExtractor`.
+
+## Distributed Tracing (OpenTelemetry) dan Korelasi Log
+
+Paket `internal/telemetry` menginisialisasi OpenTelemetry SDK (exporter stdout/console, propagator W3C `TraceContext`), HTTP middleware, fungsi propagasi queue (`telemetry.Inject` dan `telemetry.Extract`), serta `telemetry.PgxTracer()` (`pgx.QueryTracer` & `pgx.BatchTracer`) yang dipasang di seluruh pool database platform maupun target.
+
+Alur span dan korelasi log:
+1. Request masuk melewati `CorrelationMiddleware` lalu `telemetry.HTTPMiddleware` yang membuka root span HTTP (`POST /api/executions/{id}/enqueue`).
+2. Saat job dimasukkan ke antrean, `telemetry.Inject(ctx)` mengekstrak `traceparent` dan `correlation_id` ke `migration_jobs.trace_context`.
+3. Worker memulihkan trace context menggunakan `telemetry.Extract(ctx, carrier)` sehingga span `job.process`, `lock.acquire`, `revalidate`, `target.batch`, dan `db.query` memiliki **`trace_id` yang sama** dengan request HTTP pembukanya.
+4. `PgxTracer()` otomatis membuat span `db.query` dan memanggil `logx.SQL`, sehingga setiap baris log SQL mencantumkan `trace_id`, `span_id`, `correlation_id`, `execution_id`, `batch_no`, durasi, jumlah row, serta `sqlstate` bila terjadi error.
+
+Contoh keluaran nyata log JSON dan span OpenTelemetry yang berkorelasi:
+
+```json
+{"time":"2026-11-19T23:58:10.412Z","level":"INFO","event":"sql.exec","query":"UPDATE big_events SET v = v + 1 WHERE id > 100 AND id <= 200","duration_ms":14,"params":["100","200"],"rows":100,"status":"ok","migration_id":11,"execution_id":22,"job_id":33,"attempt":1,"batch_no":2,"correlation_id":"corr-abc-123","actor":"daniel","database":"7","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7"}
+{"time":"2026-11-19T23:58:10.415Z","level":"INFO","event":"batch.committed","execution_id":22,"direction":"apply","batch_no":2,"from":100,"to":200,"rows":100,"status":"ok","correlation_id":"corr-abc-123","actor":"daniel","database":"7","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"a2fb4a1d1a96d312"}
+```
+
+Contoh potongan span OpenTelemetry yang berkorelasi dengan log di atas (`TraceID: 4bf92f3577b34da6a3ce929d0e0e4736`):
+
+```json
+{
+  "Name": "db.query",
+  "SpanContext": {
+    "TraceID": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "SpanID": "00f067aa0ba902b7"
+  },
+  "Parent": {
+    "TraceID": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "SpanID": "a2fb4a1d1a96d312"
+  },
+  "SpanKind": 3,
+  "Attributes": [
+    {"Key": "db.system", "Value": {"Type": "STRING", "Value": "postgresql"}},
+    {"Key": "db.statement", "Value": {"Type": "STRING", "Value": "UPDATE big_events SET v = v + 1 WHERE id > 100 AND id <= 200"}},
+    {"Key": "db.target", "Value": {"Type": "STRING", "Value": "7"}},
+    {"Key": "execution_id", "Value": {"Type": "INT64", "Value": 22}},
+    {"Key": "batch_no", "Value": {"Type": "INT64", "Value": 2}},
+    {"Key": "db.duration_ms", "Value": {"Type": "INT64", "Value": 14}},
+    {"Key": "db.rows_affected", "Value": {"Type": "INT64", "Value": 100}}
+  ]
+}
+```
+
+## Mode Eksekusi per Batch (`internal/batch`)
+
+Untuk perubahan data berukuran besar, migration dapat dijalankan dalam mode `batch` (`exec_mode = 'batch'`) agar tidak menahan lock tabel dalam satu transaksi raksasa:
+
+- **Konvensi placeholder `:from` dan `:to` (D39)**:
+  - Migration mendefinisikan `batch_table` (mis. `big_events`), `batch_column` (kolom integer unik dan tidak berubah selama migrasi, mis. `id`), dan `batch_size` (> 0).
+  - `up_sql` dan `down_sql` wajib memuat placeholder `:from` (batas bawah **eksklusif**, `> :from`) dan `:to` (batas atas **inklusif**, `<= :to`), misalnya:
+    ```sql
+    -- SQL Up:
+    UPDATE big_events SET v = v + 1 WHERE id > :from AND id <= :to;
+    -- SQL Down:
+    UPDATE big_events SET v = v - 1 WHERE id > :from AND id <= :to;
+    ```
+  - Sebelum mulai, `batch.Runner` memverifikasi keberadaan tabel dan memastikan `batch_column` bertipe integer (`smallint`, `integer`, `bigint`) di `information_schema.columns` target, lalu men-sanitize nama tabel/kolom dengan `pgx.Identifier`.
+  - Di setiap iterasi, platform hanya mengambil batas atas batch berikutnya tanpa memuat seluruh dataset ke memori:
+    ```sql
+    SELECT max("id") FROM (SELECT "id" FROM "public"."big_events" WHERE "id" > $1 ORDER BY "id" ASC LIMIT $2) AS _dbmp_sub
+    ```
+  - Placeholder `:from` dan `:to` (yang berada di luar string literal, komentar, dollar-quote, dan type cast `::`) diganti dengan angka literal `int64`.
+- **Transaction & Checkpoint per Batch (D36, D37)**:
+  - Setiap batch dijalankan dalam satu transaction tersendiri di database target dengan `statement_timeout` (default 30s) dan `lock_timeout` (default 5s).
+  - Di dalam transaction yang sama dengan eksekusi SQL batch, runner menyisipkan bukti checkpoint ke `_dbmp.batch_checkpoints` (`PRIMARY KEY (execution_id, direction, batch_no)`), lalu melakukan `COMMIT`. Setelah commit di target berhasil, progress dicerminkan ke tabel `execution_batches` di database platform.
+- **Kegagalan Sebagian (`partial`), Resume, dan Revert Terbalik**:
+  - Bila batch ke-$k$ gagal, hanya transaction batch ke-$k$ yang di-rollback; batch $1 \dots (k-1)$ tetap committed dan status execution menjadi `partial`.
+  - **Resume** (`POST /api/executions/{id}/resume`) membaca checkpoint terakhir dari `_dbmp.batch_checkpoints` dan melanjutkan dari `to_value` terakhir tanpa mengulang batch yang sudah committed.
+  - **Revert / Rollback Batch** membaca seluruh checkpoint `direction='apply'` yang sudah committed lalu menjalankan `down_sql` per batch dalam **urutan terbalik** (`batch_no` terbesar ke terkecil), sambil mencatat checkpoint `direction='revert'` di setiap transaction batch. Bila gagal di tengah proses revert, status menjadi `partially_reverted` dan dapat di-resume hingga tuntas.
 
 ## Migration
 
@@ -235,11 +309,13 @@ internal/approval   approval perubahan oleh leader group
 internal/api        endpoint JSON (/api) untuk auth, admin, dan approval
 internal/logx       log JSON terstruktur, redaksi, correlation ID, audit
 internal/spa        penyaji hasil build frontend
+internal/telemetry  OpenTelemetry tracing, propagasi queue (Inject/Extract), HTTPMiddleware, PgxTracer
+internal/batch      eksekusi migration per batch, checkpoint target (_dbmp.batch_checkpoints), resume & revert terbalik
 frontend            SPA (React + Vite + TypeScript)
 internal/dbconn     koneksi, enkripsi kredensial, pool
-internal/explorer   viewer schema dan data
+internal/explorer   API JSON viewer schema dan data
 internal/migration  editor, eksekusi, riwayat
-internal/explain    analisis EXPLAIN / EXPLAIN ANALYZE
+internal/explain    API JSON analisis EXPLAIN / EXPLAIN ANALYZE
 internal/config platformdb apperr clock httpx view testutil
 db/platform_migrations
 web/dist (hasil build SPA) web/templates web/static (halaman HTML lama)
