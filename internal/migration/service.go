@@ -10,6 +10,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
 )
 
 // RoundOpener membuka baris approval. Dipenuhi approval.Service.
@@ -22,6 +23,7 @@ type Service struct {
 	pool   *pgxpool.Pool
 	repo   *PgRepo
 	rounds RoundOpener
+	jobs   *queue.PgQueue
 }
 
 func NewService(pool *pgxpool.Pool, repo *PgRepo, rounds RoundOpener) *Service {

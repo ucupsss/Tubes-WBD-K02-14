@@ -22,7 +22,8 @@ cp .env.example .env
 make up
 make web-install  # sekali saja: dependensi frontend
 make web-build    # membangun SPA ke web/dist (di-embed ke binary Go)
-make run          # http://localhost:8080
+make run          # API di http://localhost:8080
+make worker       # proses terpisah yang mengambil job migration
 make seed         # user, group, koneksi, dan grant untuk demo
 ```
 
@@ -34,6 +35,7 @@ Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-
 |-------------------------|---------------------------------------------------------------------------|
 | `make up` / `make down` | Menyalakan / mematikan Postgres                                           |
 | `make db-reset`         | Menghapus volume lalu menyalakan ulang dari kosong                        |
+| `make worker`       | Worker antrian migration, proses terpisah dari API                        |
 | `make web-check`        | Frontend: type-check, unit test, dan build                                |
 | `make test`             | Unit test                                                                 |
 | `make test-integration` | Unit test + integration test (butuh `make up` dan `TEST_DATABASE_URL`)    |
@@ -179,19 +181,13 @@ Helper `logx.SQL` mencatat satu eksekusi SQL (query, parameter yang disamarkan, 
 
 ## Migration
 
-Riwayat migration linear per database: versi 1, 2, 3, ... tanpa celah. Versi baru hanya ditulis bila seluruh script berhasil di-commit.
+Satu migration punya revisi SQL. Mengajukan revisi membuat execution `pending_review` dan membuka approval. API tidak menjalankan SQL di database target.
 
-Langkah eksekusi:
+Setelah execution berstatus `approved`, `POST /api/executions/{id}/enqueue` menulis satu baris `migration_jobs` dan menjawab **202** dengan `job_id`. Publish kedua untuk execution yang sama tidak membuat job baru. `POST …/resume` melanjutkan execution `partial` atau `partially_reverted` tanpa approval baru. `POST …/cancel` hanya berlaku sebelum worker mengambil job.
 
-1. Mengunci baris koneksi di platform database.
-2. Menolak percobaan bila status bukan `draft` atau `failed`, atau bila SQL melanggar D13.
-3. Menjalankan script di dalam satu transaction pada database target, dengan `statement_timeout` 60 detik dan `lock_timeout` 5 detik. Simple query protocol dipakai supaya satu field bisa berisi beberapa statement.
-4. Di transaction yang sama, mencatat versi di tabel `_dbmp.applied_migrations` pada database target.
-5. Commit di target, lalu menulis versi, status, pelaksana, waktu, dan satu baris `migration_runs` di platform. Bila ada statement yang gagal, transaction target di-rollback (statement sebelumnya ikut hilang) dan status menjadi `failed`.
+`make worker` menjalankan proses terpisah. Worker mengambil job dengan `FOR UPDATE SKIP LOCKED`. Kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`) dicoba lagi paling banyak 3 kali, dengan jeda 5 detik lalu 15 detik. Kesalahan SQL lain langsung membuat job `dead`. Job tetap ada di database setelah proses worker berhenti. Status untuk polling ada di `GET /api/jobs/{id}`.
 
-Bila proses mati sebelum commit di platform, status tetap `draft` atau `failed` karena perubahan ke `running` tidak pernah di-commit. Bila target sudah commit tetapi update platform gagal, baris di `_dbmp.applied_migrations` tetap ada dan bisa dipakai untuk rekonsiliasi.
-
-Error Postgres dari SQL milik user (misalnya relation sudah ada) ditampilkan apa adanya. Pesan kegagalan koneksi tidak memuat password maupun DSN.
+Runner yang benar-benar menjalankan SQL target belum dipasang. Sampai itu ada, worker mencatat attempt gagal dengan pesan bahwa eksekusi target belum diaktifkan, tanpa membuka koneksi ke database target.
 
 ## Analisis EXPLAIN
 

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
@@ -21,6 +22,9 @@ type Config struct {
 	BootstrapAdminUsername  string
 	BootstrapAdminPassword  string
 	TestDatabaseURL         string
+	WorkerID                string
+	WorkerConcurrency       int
+	WorkerPollInterval      time.Duration
 }
 
 // Load reads environment variables (after an optional .env file).
@@ -38,6 +42,9 @@ func Load() (Config, error) {
 		BootstrapAdminUsername:  getenv("BOOTSTRAP_ADMIN_USERNAME", "admin"),
 		BootstrapAdminPassword:  os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
 		TestDatabaseURL:         os.Getenv("TEST_DATABASE_URL"),
+		WorkerID:                os.Getenv("WORKER_ID"),
+		WorkerConcurrency:       2,
+		WorkerPollInterval:      time.Second,
 	}
 	if cfg.PlatformDatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: PLATFORM_DATABASE_URL wajib diisi")
@@ -54,6 +61,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.SessionGracePeriod, err = durationEnv("SESSION_GRACE_PERIOD", cfg.SessionGracePeriod); err != nil {
+		return Config{}, err
+	}
+	if cfg.WorkerPollInterval, err = durationEnv("WORKER_POLL_INTERVAL", cfg.WorkerPollInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.WorkerConcurrency, err = intEnv("WORKER_CONCURRENCY", cfg.WorkerConcurrency); err != nil {
 		return Config{}, err
 	}
 
@@ -79,6 +92,18 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func intEnv(key string, fallback int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("config: %s harus bilangan bulat lebih besar dari 0", key)
+	}
+	return n, nil
 }
 
 func durationEnv(key string, fallback time.Duration) (time.Duration, error) {
