@@ -25,6 +25,7 @@ make web-build    # membangun SPA ke web/dist (di-embed ke binary Go)
 make run          # API di http://localhost:8080
 make worker       # proses terpisah yang mengambil job migration
 make seed         # user, group, koneksi, dan grant untuk demo
+make k6           # stress test API baca; butuh k6 dan server yang sudah jalan
 ```
 
 Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-dev` di terminal lain, lalu buka `http://localhost:5173` (Vite meneruskan `/api` ke server Go, jadi tidak perlu CORS).
@@ -36,6 +37,7 @@ Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-
 | `make up` / `make down` | Menyalakan / mematikan Postgres                                           |
 | `make db-reset`         | Menghapus volume lalu menyalakan ulang dari kosong                        |
 | `make worker`       | Worker antrian migration, proses terpisah dari API                        |
+| `make k6`           | Stress test k6 pada API baca. Butuh [k6](https://grafana.com/docs/k6/) di PATH |
 | `make web-check`        | Frontend: type-check, unit test, dan build                                |
 | `make test`             | Unit test                                                                 |
 | `make test-integration` | Unit test + integration test (butuh `make up` dan `TEST_DATABASE_URL`)    |
@@ -203,6 +205,41 @@ Pengukuran pada AMD Ryzen 7 7435HS (8 core / 16 thread), RAM 15,7 GB, Postgres 1
 |------|--------|
 | Satu `UPDATE big_events SET payload = payload + 1` tanpa batch | 1,311 detik |
 | Update yang sama, 8 batch × 50.000 baris | 1,533 detik |
+
+## Stress test k6
+
+Skrip `load/k6/api.js` menaikkan lalu menurunkan beban pada API baca. Tiap VU masuk sebagai `alice` sekali (`GET /api/csrf` lalu `POST /api/auth/login`), kemudian berulang membaca `GET /api/me`, daftar database, daftar migration, dan riwayat execution `target-db-1`. Jeda antar putaran 1 detik. Enqueue dan eksekusi SQL tidak ikut, supaya pengukuran tidak mengisi riwayat dan tidak berebut kunci database. Worker tidak perlu jalan.
+
+Pasang k6 di Windows dengan `winget install --id GrafanaLabs.k6`. Atau lewat Docker, dari akar repo:
+
+```bash
+docker run --rm -v "$(pwd)/load/k6:/scripts" -e BASE_URL=http://host.docker.internal:8080 grafana/k6 run /scripts/api.js
+```
+
+Jalankan setelah `make up`, `make seed`, dan `make run`:
+
+```bash
+make k6
+```
+
+`BASE_URL` default `http://localhost:8080`. Lima tingkat berjalan berurutan. Masing-masing naik ke target dalam 15 detik, lalu bertahan 45 detik.
+
+- `5-up`, lalu `15-up`, lalu `30-up`
+- turun ke `15-down`, lalu `5-down`
+
+Ambang lulus, untuk seluruh jalan dan untuk tiap tingkat: error rate di bawah 1%, dan p95 request baca di bawah 1 detik.
+
+Pengukuran pada mesin yang sama dengan dataset (AMD Ryzen 7 7435HS, 8 core / 16 thread, RAM 15,7 GB), server Go dan Postgres 16 di mesin lokal:
+
+| Tingkat | VU | Request | p95 baca | Error rate |
+|---------|----|---------|----------|------------|
+| 5-up | 5 | 770 | 7,11 ms | 0% |
+| 15-up | 15 | 2.349 | 7,28 ms | 0% |
+| 30-up | 30 | 4.695 | 7,16 ms | 0% |
+| 15-down | 15 | 2.339 | 7,12 ms | 0% |
+| 5-down | 5 | 764 | 7,51 ms | 0% |
+
+p95 baca seluruh jalan 7,18 ms, error rate 0%. Semua tingkat lulus ambang.
 
 ## Analisis EXPLAIN
 
