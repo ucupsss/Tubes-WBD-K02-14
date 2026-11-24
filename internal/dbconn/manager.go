@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 )
@@ -30,6 +31,15 @@ type DefaultManager struct {
 	secretKey []byte
 	pools     map[int64]*pgxpool.Pool
 	mu        sync.RWMutex
+	tracer    pgx.QueryTracer
+}
+
+// SetTracer memasang tracer pgx pada pool yang dibuat setelah pemanggilan ini.
+// Nil mematikan tracer. Dipakai bila paket telemetry menyediakan PgxTracer.
+func (m *DefaultManager) SetTracer(t pgx.QueryTracer) {
+	m.mu.Lock()
+	m.tracer = t
+	m.mu.Unlock()
 }
 
 // NewManager membuat instance DefaultManager baru.
@@ -86,6 +96,10 @@ func (m *DefaultManager) Pool(ctx context.Context, dbID int64) (*pgxpool.Pool, e
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, ErrUnavailable
+	}
+
+	if m.tracer != nil {
+		cfg.ConnConfig.Tracer = m.tracer
 	}
 
 	// Konfigurasi pool standar

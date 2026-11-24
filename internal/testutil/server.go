@@ -12,12 +12,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/approval"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/clock"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
@@ -39,9 +40,11 @@ func NewServer(t *testing.T, pool *pgxpool.Pool) *Server {
 	t.Cleanup(mgr.CloseAll)
 
 	az := authz.NewAuthorizer(dbconn.NewGrantRepo(pool))
-	svc := migration.NewService(pool, migration.NewPgRepo(), mgr, clock.Real{})
+	repo := migration.NewPgRepo()
+	approvalSvc := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), repo)
+	svc := migration.NewService(pool, repo, approvalSvc).WithQueue(queue.New(pool))
 	views := view.New()
-	h := migration.NewHandler(svc, views, az)
+	h := migration.NewHandler(svc, az, approvalSvc)
 	mux := http.NewServeMux()
 	mw := authz.NewMiddleware(az, func(w http.ResponseWriter, r *http.Request, err error) {
 		httpx.HandleError(w, r, views, err)

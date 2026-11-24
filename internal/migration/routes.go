@@ -6,18 +6,27 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 )
 
-// AuthorizerMiddleware is the subset of authz.Middleware used to register routes.
+// AuthorizerMiddleware adalah bagian authz.Middleware yang dipakai untuk mendaftarkan route.
 type AuthorizerMiddleware interface {
 	Protect(action authz.Action, h http.HandlerFunc) http.Handler
+	RequireLogin(next http.Handler) http.Handler
 }
 
-// RegisterRoutes mounts the migration pages. The EXPLAIN route belongs to package explain.
+// RegisterRoutes memasang API JSON migration dan execution.
 func RegisterRoutes(mux *http.ServeMux, h *Handler, mw AuthorizerMiddleware) {
-	mux.Handle("GET /db/{dbID}/migrations", mw.Protect(authz.ActMigrationView, h.List))
-	mux.Handle("GET /db/{dbID}/migrations/new", mw.Protect(authz.ActMigrationCreate, h.New))
-	mux.Handle("POST /db/{dbID}/migrations", mw.Protect(authz.ActMigrationCreate, h.Create))
-	mux.Handle("GET /db/{dbID}/migrations/{id}", mw.Protect(authz.ActMigrationView, h.Show))
-	mux.Handle("POST /db/{dbID}/migrations/{id}/edit", mw.Protect(authz.ActMigrationEdit, h.Update))
-	mux.Handle("POST /db/{dbID}/migrations/{id}/execute", mw.Protect(authz.ActMigrationExecute, h.Execute))
-	mux.Handle("POST /db/{dbID}/migrations/{id}/delete", mw.Protect(authz.ActMigrationDelete, h.Delete))
+	mux.Handle("GET /api/databases/{dbID}/migrations", mw.Protect(authz.ActMigrationView, h.List))
+	mux.Handle("POST /api/databases/{dbID}/migrations", mw.Protect(authz.ActMigrationCreate, h.Create))
+	mux.Handle("GET /api/databases/{dbID}/migrations/{id}", mw.Protect(authz.ActMigrationView, h.Get))
+	mux.Handle("PUT /api/databases/{dbID}/migrations/{id}", mw.Protect(authz.ActMigrationEdit, h.Update))
+	mux.Handle("DELETE /api/databases/{dbID}/migrations/{id}", mw.Protect(authz.ActMigrationDelete, h.Delete))
+	mux.Handle("POST /api/databases/{dbID}/migrations/{id}/validate", mw.Protect(authz.ActMigrationEdit, h.Validate))
+	mux.Handle("POST /api/databases/{dbID}/migrations/{id}/submit", mw.Protect(authz.ActMigrationSubmit, h.Submit))
+	mux.Handle("POST /api/databases/{dbID}/migrations/{id}/forward", mw.Protect(authz.ActMigrationSubmit, h.Forward))
+	mux.Handle("POST /api/databases/{dbID}/migrations/{id}/rollback", mw.Protect(authz.ActMigrationRollback, h.Rollback))
+	mux.Handle("GET /api/databases/{dbID}/executions", mw.Protect(authz.ActMigrationView, h.ListExecutions))
+	mux.Handle("GET /api/executions/{execID}", mw.RequireLogin(http.HandlerFunc(h.ShowExecution)))
+	mux.Handle("POST /api/executions/{execID}/enqueue", mw.RequireLogin(http.HandlerFunc(h.Enqueue)))
+	mux.Handle("POST /api/executions/{execID}/resume", mw.RequireLogin(http.HandlerFunc(h.Resume)))
+	mux.Handle("POST /api/executions/{execID}/cancel", mw.RequireLogin(http.HandlerFunc(h.Cancel)))
+	mux.Handle("GET /api/jobs/{jobID}", mw.RequireLogin(http.HandlerFunc(h.ShowJob)))
 }

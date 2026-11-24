@@ -10,6 +10,7 @@ import (
 	"io"
 )
 
+// Kesalahan kunci dan ciphertext. Jangan bungkus dengan detail DSN.
 var (
 	ErrInvalidKeyLength = errors.New("secret key must be 32 bytes (AES-256)")
 	ErrCiphertextShort  = errors.New("ciphertext too short")

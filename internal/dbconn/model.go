@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// Kesalahan koneksi target yang aman ditampilkan. ErrUnavailable tidak memuat DSN.
 var (
 	ErrNotFound      = errors.New("koneksi database tidak ditemukan")
 	ErrUnavailable   = errors.New("database target tidak dapat dihubungi")
@@ -71,6 +72,7 @@ type CreateInput struct {
 	CreatedBy int64
 }
 
+// Validate mengembalikan pesan per field. Peta kosong berarti input diterima.
 func (in CreateInput) Validate() map[string]string {
 	errs := make(map[string]string)
 	if strings.TrimSpace(in.Name) == "" {
@@ -109,6 +111,7 @@ type UpdateInput struct {
 	SSLMode  string
 }
 
+// Validate mengembalikan pesan per field. Password kosong tidak dianggap kesalahan.
 func (in UpdateInput) Validate() map[string]string {
 	errs := make(map[string]string)
 	if strings.TrimSpace(in.Name) == "" {

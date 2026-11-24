@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -43,12 +42,7 @@ func (r *DefaultRunner) Apply(ctx context.Context, target *pgxpool.Pool, spec Sp
 	if err := ValidateSpec(spec, DirectionApply); err != nil {
 		return Result{Status: StatusFailed}, err
 	}
-	// Validasi aturan SQL berbahaya menggunakan contoh ekspansi dummy (0, 1).
-	sampleSQL, err := ExpandBounds(spec.UpSQL, 0, 1)
-	if err != nil {
-		return Result{Status: StatusFailed}, err
-	}
-	if err := migration.ValidateSQL(sampleSQL); err != nil {
+	if _, err := ExpandBounds(spec.UpSQL, 0, 1); err != nil {
 		return Result{Status: StatusFailed}, err
 	}
 
@@ -261,11 +255,7 @@ func (r *DefaultRunner) Revert(ctx context.Context, target *pgxpool.Pool, spec S
 	if err := ValidateSpec(spec, DirectionRevert); err != nil {
 		return Result{Status: StatusFailed}, err
 	}
-	sampleSQL, err := ExpandBounds(spec.DownSQL, 0, 1)
-	if err != nil {
-		return Result{Status: StatusFailed}, err
-	}
-	if err := migration.ValidateSQL(sampleSQL); err != nil {
+	if _, err := ExpandBounds(spec.DownSQL, 0, 1); err != nil {
 		return Result{Status: StatusFailed}, err
 	}
 
@@ -273,7 +263,12 @@ func (r *DefaultRunner) Revert(ctx context.Context, target *pgxpool.Pool, spec S
 		return Result{Status: StatusFailed}, err
 	}
 
-	applied, err := ListTargetCheckpoints(ctx, target, spec.ExecutionID, DirectionApply)
+	sourceExecID := spec.SourceExecutionID
+	if sourceExecID <= 0 {
+		sourceExecID = spec.ExecutionID
+	}
+
+	applied, err := ListTargetCheckpoints(ctx, target, sourceExecID, DirectionApply)
 	if err != nil {
 		return Result{Status: StatusFailed}, err
 	}
@@ -463,24 +458,91 @@ func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// execBatchStatements memecah teks SQL batch menjadi statement individual dan mengeksekusinya
-// melalui tx.Exec (dengan QueryExecModeSimpleProtocol) supaya PgxTracer mencatat setiap SQL
-// sekaligus menghitung total rows_affected.
+// execBatchStatements memecah teks SQL batch menjadi statement individual (di luar literal/komentar/dollar-quote)
+// dan mengeksekusinya melalui tx.Exec (dengan QueryExecModeSimpleProtocol) supaya PgxTracer mencatat
+// setiap SQL sekaligus menghitung total rows_affected.
 func execBatchStatements(ctx context.Context, tx pgx.Tx, sqlText string) (int64, error) {
-	stmts, err := migration.SplitStatements(sqlText)
-	if err != nil {
-		return 0, err
-	}
+	stmts := splitBatchSQL(sqlText)
 	var totalRows int64
-	for _, st := range stmts {
+	for _, stmt := range stmts {
 		var tag pgconn.CommandTag
-		tag, err = tx.Exec(ctx, st.SQL, pgx.QueryExecModeSimpleProtocol)
+		tag, err := tx.Exec(ctx, stmt, pgx.QueryExecModeSimpleProtocol)
 		if err != nil {
 			return totalRows, err
 		}
 		totalRows += tag.RowsAffected()
 	}
 	return totalRows, nil
+}
+
+func splitBatchSQL(s string) []string {
+	var stmts []string
+	n := len(s)
+	start := 0
+	for i := 0; i < n; {
+		c := s[i]
+		if c == '-' && i+1 < n && s[i+1] == '-' {
+			i += 2
+			for i < n && s[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < n && s[i+1] == '*' {
+			i += 2
+			for i+1 < n && !(s[i] == '*' && s[i+1] == '/') {
+				i++
+			}
+			if i+1 < n {
+				i += 2
+			} else {
+				i = n
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote := c
+			i++
+			for i < n {
+				if s[i] == quote {
+					if i+1 < n && s[i+1] == quote {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if c == '$' {
+			if tagLen := matchDollarTag(s[i:]); tagLen > 0 {
+				tag := s[i : i+tagLen]
+				i += tagLen
+				endIdx := strings.Index(s[i:], tag)
+				if endIdx >= 0 {
+					i += endIdx + tagLen
+				} else {
+					i = n
+				}
+				continue
+			}
+		}
+		if c == ';' {
+			if piece := strings.TrimSpace(s[start:i]); piece != "" {
+				stmts = append(stmts, piece)
+			}
+			i++
+			start = i
+			continue
+		}
+		i++
+	}
+	if tail := strings.TrimSpace(s[start:]); tail != "" {
+		stmts = append(stmts, tail)
+	}
+	return stmts
 }
 
 // validateAndResolveTableColumn memverifikasi bahwa tabel dan kolom batch benar-benar ada di katalog

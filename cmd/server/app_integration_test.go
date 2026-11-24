@@ -2,10 +2,9 @@
 
 package main
 
-// Test end-to-end lewat router produksi (newApp). Login dan administrasi memakai API JSON seperti SPA;
-// explorer dan migration masih halaman HTML (template) sampai dipindah ke SPA. Alur minimum spesifikasi:
-// Login → Access Control → Select Database → View Schema/Data → Create Migration → Execute →
-// Commit/Rollback → Update Migration History.
+// Test end-to-end lewat router produksi (newApp). Login, administrasi, dan migration memakai API JSON.
+// Explorer masih halaman HTML. Alur yang sudah ada di server: login → akses → lihat schema/data →
+// buat migration → ajukan review. Menjalankan SQL di database target dilakukan worker, bukan API.
 
 import (
 	"bytes"
@@ -293,10 +292,10 @@ func TestApp_PublicRoutes(t *testing.T) {
 	expect(t, rec, http.StatusUnauthorized, "")
 	expectBody(t, rec, `"unauthenticated"`)
 
-	// Halaman HTML lama (migration) tetap mengarahkan ke /login yang kini milik SPA.
-	for _, p := range []string{"/db/1/migrations"} {
-		expect(t, b.get(p), http.StatusSeeOther, "/login")
-	}
+	// Seluruh halaman frontend (explorer, migration, executions) kini disajikan oleh SPA.
+	spaMig := b.get("/db/1/migrations")
+	expect(t, spaMig, http.StatusOK, "")
+	expectBody(t, spaMig, `id="root"`)
 }
 
 func TestApp_SpecFlow(t *testing.T) {
@@ -359,68 +358,52 @@ func TestApp_SpecFlow(t *testing.T) {
 	expect(t, bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/tables/public/tidak_ada", dbID), nil), http.StatusNotFound, "")
 	expect(t, bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/tables/public/customers%%3B%%20DROP%%20TABLE%%20customers/data", dbID), nil), http.StatusNotFound, "")
 
-	// View Only: bisa melihat riwayat migration, tidak bisa membuat.
-	migPath := fmt.Sprintf("/db/%d/migrations", dbID)
-	expect(t, bob.get(migPath), http.StatusOK, "")
-	expect(t, bob.get(migPath+"/new"), http.StatusForbidden, "")
-	expect(t, bob.post(migPath, url.Values{"title": {"x"}, "sql_text": {"CREATE TABLE x (id int)"}}), http.StatusForbidden, "")
+	// View Only: boleh membaca riwayat lewat API, tidak boleh membuat.
+	migAPI := fmt.Sprintf("/api/databases/%d/migrations", dbID)
+	expect(t, bob.api(http.MethodGet, migAPI, nil), http.StatusOK, "")
+	expect(t, bob.api(http.MethodPost, migAPI, map[string]any{
+		"title": "x", "up_sql": "CREATE TABLE x (id int)", "down_sql": "DROP TABLE x",
+	}), http.StatusForbidden, "")
 
 	// 4. Admin menaikkan akses ke edit → session bob dirotasi pada request berikutnya.
 	expect(t, admin.api(http.MethodPut, accessPath, grant("edit")), http.StatusNoContent, "")
 	before := bob.cookies[session.CookieName].Value
-	expect(t, bob.get(migPath+"/new"), http.StatusOK, "")
+	expect(t, bob.api(http.MethodGet, "/api/databases", nil), http.StatusOK, "")
 	if bob.cookies[session.CookieName].Value == before {
 		t.Fatal("privilege naik harus merotasi session")
 	}
 
-	// 5. Create migration → Execute → commit; versi 1 tercatat.
-	expect(t, bob.post(migPath, url.Values{
-		"title":    {"Tambah kolom phone"},
-		"sql_text": {"ALTER TABLE customers ADD COLUMN phone TEXT; CREATE INDEX idx_customers_phone ON customers (phone);"},
-	}), http.StatusSeeOther, "")
+	// 5. Buat migration dan ajukan review. API tidak menjalankan SQL di database target.
+	created := bob.api(http.MethodPost, migAPI, map[string]any{
+		"title":    "Tambah kolom phone",
+		"up_sql":   "ALTER TABLE customers ADD COLUMN phone TEXT",
+		"down_sql": "ALTER TABLE customers DROP COLUMN phone",
+	})
+	expect(t, created, http.StatusCreated, "")
 	okID := scalar[int64](t, e.pool, `SELECT id FROM migrations WHERE title = 'Tambah kolom phone'`)
-	bob.get(fmt.Sprintf("%s/%d", migPath, okID))
-	expect(t, bob.post(fmt.Sprintf("%s/%d/execute", migPath, okID), nil), http.StatusSeeOther, "")
-	if s := scalar[string](t, e.pool, `SELECT status FROM migrations WHERE id = $1`, okID); s != "success" {
-		t.Fatalf("status = %s, want success", s)
+	if n := scalar[int](t, e.target, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'customers' AND column_name = 'phone'`); n != 0 {
+		t.Fatal("membuat migration tidak boleh mengubah database target")
 	}
-	if v := scalar[int32](t, e.pool, `SELECT version FROM migrations WHERE id = $1`, okID); v != 1 {
-		t.Fatalf("version = %d, want 1", v)
+	submitted := bob.api(http.MethodPost, fmt.Sprintf("%s/%d/submit", migAPI, okID), map[string]any{})
+	expect(t, submitted, http.StatusCreated, "")
+	expectBody(t, submitted, `"status":"pending_review"`, `"kind":"apply"`)
+	var version *int32
+	if err := e.pool.QueryRow(context.Background(), `SELECT version FROM migrations WHERE id = $1`, okID).Scan(&version); err != nil {
+		t.Fatal(err)
 	}
-	if n := scalar[int](t, e.target, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'customers' AND column_name = 'phone'`); n != 1 {
-		t.Fatal("kolom phone harus ada di target setelah commit")
-	}
-
-	// 6. Migration gagal di statement kedua → seluruhnya di-rollback, status failed, tanpa versi.
-	expect(t, bob.post(migPath, url.Values{
-		"title":    {"Gagal"},
-		"sql_text": {"CREATE TABLE orders (id int); INSERT INTO tabel_tidak_ada VALUES (1);"},
-	}), http.StatusSeeOther, "")
-	failID := scalar[int64](t, e.pool, `SELECT id FROM migrations WHERE title = 'Gagal'`)
-	bob.get(fmt.Sprintf("%s/%d", migPath, failID))
-	expect(t, bob.post(fmt.Sprintf("%s/%d/execute", migPath, failID), nil), http.StatusSeeOther, "")
-	if s := scalar[string](t, e.pool, `SELECT status FROM migrations WHERE id = $1`, failID); s != "failed" {
-		t.Fatalf("status = %s, want failed", s)
-	}
-	if n := scalar[int](t, e.target, `SELECT count(*) FROM information_schema.tables WHERE table_name = 'orders'`); n != 0 {
-		t.Fatal("statement pertama harus ikut di-rollback")
+	if version != nil {
+		t.Fatalf("version = %v, want null sebelum worker berjalan", *version)
 	}
 
-	// 7. Riwayat migration menampilkan versi, SQL, pelaksana, dan status.
-	hist := bob.get(migPath)
+	hist := bob.api(http.MethodGet, fmt.Sprintf("/api/databases/%d/executions", dbID), nil)
 	expect(t, hist, http.StatusOK, "")
-	expectBody(t, hist, "Tambah kolom phone", "Gagal")
-	show := bob.get(fmt.Sprintf("%s/%d", migPath, okID))
-	expectBody(t, show, "ALTER TABLE customers ADD COLUMN phone TEXT", "bob")
-	if runs := scalar[int](t, e.pool, `SELECT count(*) FROM migration_runs`); runs != 2 {
-		t.Fatalf("migration_runs = %d, want 2 (sukses + gagal)", runs)
-	}
+	expectBody(t, hist, "Tambah kolom phone", `"pending_review"`)
 
-	// 8. Pencabutan akses: bob dinonaktifkan → session langsung mati.
+	// 6. Pencabutan akses: bob dinonaktifkan → session langsung mati.
 	expect(t, admin.api(http.MethodPut, fmt.Sprintf("/api/admin/users/%d", bobID), map[string]bool{"is_admin": false, "is_active": false}),
 		http.StatusNoContent, "")
-	expect(t, bob.get(migPath), http.StatusSeeOther, "/login")
 	expect(t, bob.api(http.MethodGet, "/api/me", nil), http.StatusUnauthorized, "")
+	expect(t, bob.api(http.MethodGet, migAPI, nil), http.StatusUnauthorized, "")
 
 	// 9. Logout admin → cookie lama ditolak.
 	oldCookie := admin.cookies[session.CookieName].Value
@@ -430,8 +413,8 @@ func TestApp_SpecFlow(t *testing.T) {
 	expect(t, stale.api(http.MethodGet, "/api/admin/users", nil), http.StatusUnauthorized, "")
 }
 
-func TestApp_HTMLFormCSRFRequired(t *testing.T) {
-	// Form HTML lama (migration) tetap wajib membawa token CSRF milik session.
+func TestApp_CSRFRequired(t *testing.T) {
+	// Mutasi API wajib membawa token CSRF milik session.
 	e := setup(t)
 	bobID := testutil.CreateUser(t, e.pool, "bob", false)
 	dbID := testutil.CreateConnection(t, e.pool, e.targetName)
@@ -441,7 +424,7 @@ func TestApp_HTMLFormCSRFRequired(t *testing.T) {
 
 	b := newBrowser(t, e.app)
 	expect(t, b.login("bob", testutil.TestPassword), http.StatusOK, "")
-	migPath := fmt.Sprintf("/db/%d/migrations", dbID)
+	migPath := fmt.Sprintf("/api/databases/%d/migrations", dbID)
 	form := url.Values{"title": {"tanpa-csrf"}, "sql_text": {"SELECT 1"}}
 
 	form.Set(csrf.FormField, "")
@@ -452,7 +435,13 @@ func TestApp_HTMLFormCSRFRequired(t *testing.T) {
 		t.Fatal("POST tanpa CSRF valid tidak boleh mengubah data")
 	}
 
-	expect(t, b.post(migPath, url.Values{"title": {"dengan-csrf"}, "sql_text": {"SELECT 1"}}), http.StatusSeeOther, "")
+	// Token CSRF salah ditolak. Token yang benar membuat migration lewat API dan tidak menyentuh target.
+	expect(t, b.api(http.MethodPost, migPath, map[string]any{
+		"title": "dengan-csrf", "up_sql": "SELECT 1", "down_sql": "SELECT 1",
+	}), http.StatusCreated, "")
+	if n := scalar[int](t, e.pool, `SELECT count(*) FROM migrations`); n != 1 {
+		t.Fatalf("migrations = %d, want 1", n)
+	}
 }
 
 func TestApp_UnavailableTarget(t *testing.T) {
@@ -497,7 +486,6 @@ func TestApp_Explain(t *testing.T) {
 	testutil.Grant(t, e.pool, viewers, dbID, "view")
 	migID := testutil.CreateDraft(t, e.pool, dbID, bobID,
 		"CREATE TABLE t (id INT); INSERT INTO t VALUES (1); SELECT * FROM customers WHERE email = 'a@x.test'")
-	detail := fmt.Sprintf("/db/%d/migrations/%d", dbID, migID)
 	explainAPI := fmt.Sprintf("/api/databases/%d/migrations/%d/explain", dbID, migID)
 
 	bob := newBrowser(t, e.app)
@@ -508,8 +496,13 @@ func TestApp_Explain(t *testing.T) {
 	if n := scalar[int](t, e.target, `SELECT count(*) FROM information_schema.tables WHERE table_name = 't'`); n != 0 {
 		t.Fatal("analisis tidak boleh meninggalkan table t di target")
 	}
-	if s := scalar[string](t, e.pool, `SELECT status FROM migrations WHERE id = $1`, migID); s != "draft" {
-		t.Fatalf("analisis tidak boleh mengubah status migration, got %s", s)
+	var frozen *time.Time
+	if err := e.pool.QueryRow(context.Background(), `
+		SELECT frozen_at FROM migration_revisions WHERE migration_id = $1`, migID).Scan(&frozen); err != nil {
+		t.Fatal(err)
+	}
+	if frozen != nil {
+		t.Fatal("analisis tidak boleh membekukan revisi")
 	}
 
 	// View Only: ditolak di backend.
@@ -517,8 +510,9 @@ func TestApp_Explain(t *testing.T) {
 	carol.login("carol", testutil.TestPassword)
 	expect(t, carol.api(http.MethodPost, explainAPI, map[string]bool{"analyze": false}), http.StatusForbidden, "")
 
-	// Migration yang sudah success tidak dianalisis ulang.
-	bob.get(detail)
-	expect(t, bob.post(detail+"/execute", nil), http.StatusSeeOther, "")
+	if _, err := e.pool.Exec(context.Background(), `
+		UPDATE migration_revisions SET frozen_at = now() WHERE migration_id = $1`, migID); err != nil {
+		t.Fatal(err)
+	}
 	expect(t, bob.api(http.MethodPost, explainAPI, map[string]bool{"analyze": false}), http.StatusConflict, "")
 }

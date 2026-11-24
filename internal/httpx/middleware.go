@@ -8,6 +8,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 )
 
+// MaxBodyBytes adalah batas default ukuran body request (1 MB).
 const MaxBodyBytes int64 = 1 << 20
 
 // Chain wraps h so the first middleware is the outermost.

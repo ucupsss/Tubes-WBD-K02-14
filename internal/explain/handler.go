@@ -10,12 +10,11 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 )
 
 // Migrations adalah bagian migration.Service yang dibutuhkan untuk analisis EXPLAIN.
 type Migrations interface {
-	Get(ctx context.Context, dbID, id int64) (migration.Migration, []migration.Run, error)
+	ExplainSource(ctx context.Context, dbID, id int64) (title, sql string, err error)
 }
 
 // Handler menangani endpoint REST JSON untuk analisis EXPLAIN / EXPLAIN ANALYZE (Milestone 2, B3).
@@ -59,18 +58,14 @@ func (h *Handler) Explain(w http.ResponseWriter, r *http.Request) {
 		req.Analyze = true
 	}
 
-	m, _, err := h.migs.Get(ctx, dbID, id)
+	_, sqlText, err := h.migs.ExplainSource(ctx, dbID, id)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	if m.Status != migration.StatusDraft && m.Status != migration.StatusFailed {
-		httpx.WriteError(w, r, ErrNotAnalyzable)
-		return
-	}
 
 	start := time.Now()
-	report, err := h.analyzer.Analyze(ctx, dbID, m.SQLText, req.Analyze)
+	report, err := h.analyzer.Analyze(ctx, dbID, sqlText, req.Analyze)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return

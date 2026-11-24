@@ -1,3 +1,4 @@
+// Program server adalah API HTTP dan penyaji SPA. Ia tidak menjalankan SQL migration di database target.
 package main
 
 import (

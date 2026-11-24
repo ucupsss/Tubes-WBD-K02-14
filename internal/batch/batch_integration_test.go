@@ -13,6 +13,19 @@ import (
 func TestBatchRunner_ApplyAllCommitted(t *testing.T) {
 	ctx := context.Background()
 	platformPool := testutil.NewPlatformDB(t)
+	uid := testutil.CreateUser(t, platformPool, "daniel", false)
+	dbID := testutil.CreateConnection(t, platformPool, "target-batch")
+	var migID, revID, execID int64
+	if err := platformPool.QueryRow(ctx, `INSERT INTO migrations (database_id, title, created_by) VALUES ($1, 'Batch Test', $2) RETURNING id`, dbID, uid).Scan(&migID); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformPool.QueryRow(ctx, `INSERT INTO migration_revisions (migration_id, revision_no, up_sql, down_sql, exec_mode, sql_hash, created_by) VALUES ($1, 1, 'SELECT 1', 'SELECT 1', 'batch', 'hash', $2) RETURNING id`, migID, uid).Scan(&revID); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformPool.QueryRow(ctx, `INSERT INTO executions (database_id, migration_id, revision_id, kind, status, requested_by) VALUES ($1, $2, $3, 'apply', 'running', $4) RETURNING id`, dbID, migID, revID, uid).Scan(&execID); err != nil {
+		t.Fatal(err)
+	}
+
 	_, targetPool := testutil.NewTargetDB(t, `
 		CREATE TABLE items (
 			id  INT PRIMARY KEY,
@@ -28,7 +41,7 @@ func TestBatchRunner_ApplyAllCommitted(t *testing.T) {
 	var events []batch.Checkpoint
 	sink := batch.ProgressFunc(func(ctx context.Context, dir string, batchNo int, from, to, rows int64) error {
 		cp := batch.Checkpoint{
-			ExecutionID:  101,
+			ExecutionID:  execID,
 			Direction:    dir,
 			BatchNo:      batchNo,
 			FromValue:    from,
@@ -40,7 +53,7 @@ func TestBatchRunner_ApplyAllCommitted(t *testing.T) {
 	})
 
 	spec := batch.Spec{
-		ExecutionID: 101,
+		ExecutionID: execID,
 		Table:       "items",
 		Column:      "id",
 		Size:        10,
@@ -80,7 +93,7 @@ func TestBatchRunner_ApplyAllCommitted(t *testing.T) {
 	}
 
 	// Pastikan cermin di database platform tercatat 3 baris.
-	mirrored, err := mirror.ListByExecution(ctx, 101)
+	mirrored, err := mirror.ListByExecution(ctx, execID)
 	if err != nil {
 		t.Fatal(err)
 	}

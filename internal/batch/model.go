@@ -41,9 +41,12 @@ var (
 // Spec mendefinisikan konfigurasi eksekusi batch untuk satu execution.
 type Spec struct {
 	ExecutionID int64
-	MigrationID int64
-	JobID       int64
-	Attempt     int
+	// SourceExecutionID adalah execution_id tempat checkpoint direction='apply' berada saat melakukan Revert.
+	// Bila 0, menggunakan ExecutionID.
+	SourceExecutionID int64
+	MigrationID       int64
+	JobID             int64
+	Attempt           int
 	// Table adalah nama tabel yang menjadi acuan cursor batch (mis. "big_events" atau "public.big_events").
 	Table string
 	// Column adalah kolom integer unik yang menjadi cursor (mis. "id").

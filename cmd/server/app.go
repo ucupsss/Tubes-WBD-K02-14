@@ -24,6 +24,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/session"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/spa"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
@@ -37,7 +38,7 @@ type app struct {
 }
 
 // newApp wires every module and the middleware chain:
-// Correlation → Logger → Recover → MaxBytes → session.Load → csrf.Verify → mux (authz.Protect per route).
+// Correlation → Telemetry → Logger → Recover → MaxBytes → session.Load → csrf.Verify → mux (authz.Protect per route).
 func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Logger) (*app, error) {
 	views, err := view.NewFromFS(webFS)
 	if err != nil {
@@ -83,13 +84,12 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 		httpx.HandleError(w, r, views, apperr.NotFound("Halaman tidak ditemukan"))
 	})
 
+	migRepo := migration.NewPgRepo()
+	approvalSvc := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), migRepo)
 	groupsSvc := groups.NewService(pool, groups.NewPgRepo(), bumper)
 	usersSvc := users.NewService(pool, users.NewPgRepo(), authSvc, sessMgr).WithLeaderGuard(groupsSvc)
 	databasesSvc := databases.NewService(pool, dbRepo, conns, cfg.SecretKey)
 	accessSvc := access.NewService(pool, access.NewPgRepo(), bumper)
-	// Selama modul execution milik C belum ada, approve/reject mengembalikan 409 executions_unavailable.
-	approvalSvc := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), approval.UnavailableExecutions{})
-
 	api.New(api.Deps{
 		Auth: authSvc, Sessions: sessMgr, Users: usersSvc, Groups: groupsSvc, Access: accessSvc,
 		Databases: databasesSvc, Approval: approvalSvc, Authz: az, Logger: logger,
@@ -97,8 +97,8 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 
 	auth.RegisterRoutes(mux, auth.NewHandler(authSvc, sessMgr, views, logger), mw)
 	explorer.RegisterRoutes(mux, explorer.NewHandler(explorer.NewService(conns, az, explorer.NewPgRepo(), getter)), mw)
-	migSvc := migration.NewService(pool, migration.NewPgRepo(), conns, clk)
-	migration.RegisterRoutes(mux, migration.NewHandler(migSvc, views, az), mw)
+	migSvc := migration.NewService(pool, migRepo, approvalSvc).WithQueue(queue.New(pool))
+	migration.RegisterRoutes(mux, migration.NewHandler(migSvc, az, approvalSvc), mw)
 	explain.RegisterRoutes(mux, explain.NewHandler(migSvc, explain.NewAnalyzer(conns)), mw)
 
 	handler := httpx.Chain(mux,
