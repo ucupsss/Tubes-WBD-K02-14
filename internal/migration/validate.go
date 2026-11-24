@@ -3,32 +3,109 @@ package migration
 import (
 	"errors"
 	"strings"
+	"unicode"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 )
 
 const maxSQLBytes = 256 * 1024
 
-// CreateInput is the editor payload for a new or updated migration.
-type CreateInput struct {
-	DatabaseID int64
-	Title      string
-	SQLText    string
+// Input adalah isi form buat/ubah migration.
+type Input struct {
+	Title              string
+	UpSQL              string
+	DownSQL            string
+	Irreversible       bool
+	IrreversibleReason string
+	ExecMode           string
+	BatchTable         string
+	BatchColumn        string
+	BatchSize          int
 }
 
-// Validate checks the title and SQL. Rejected SQL is reported on the sql_text field.
-func (in CreateInput) Validate() error {
+// Normalized mengisi mode default dan memotong spasi. Tidak mengubah penerima.
+func (in Input) Normalized() Input {
+	in.Title = strings.TrimSpace(in.Title)
+	in.UpSQL = strings.TrimSpace(in.UpSQL)
+	in.DownSQL = strings.TrimSpace(in.DownSQL)
+	in.IrreversibleReason = strings.TrimSpace(in.IrreversibleReason)
+	in.ExecMode = strings.TrimSpace(in.ExecMode)
+	in.BatchTable = strings.TrimSpace(in.BatchTable)
+	in.BatchColumn = strings.TrimSpace(in.BatchColumn)
+	if in.ExecMode == "" {
+		in.ExecMode = ModeNormal
+	}
+	if in.Irreversible {
+		in.DownSQL = ""
+	}
+	if in.ExecMode != ModeBatch {
+		in.BatchTable = ""
+		in.BatchColumn = ""
+		in.BatchSize = 0
+	}
+	return in
+}
+
+// Validate memeriksa judul, SQL up/down, alasan irreversible, dan konfigurasi batch.
+func (in Input) Validate() error {
+	in = in.Normalized()
 	fields := map[string]string{}
-	if strings.TrimSpace(in.Title) == "" {
+	if in.Title == "" {
 		fields["title"] = "Judul wajib diisi"
 	}
-	if msg := sqlProblem(in.SQLText); msg != "" {
-		fields["sql_text"] = msg
+	if in.ExecMode != ModeNormal && in.ExecMode != ModeBatch {
+		fields["exec_mode"] = "Mode harus normal atau batch"
+	}
+	if msg := sqlProblem(in.UpSQL); msg != "" {
+		fields["up_sql"] = msg
+	}
+	if in.Irreversible {
+		if in.IrreversibleReason == "" {
+			fields["irreversible_reason"] = "Alasan wajib diisi untuk migration yang tidak dapat di-rollback"
+		}
+	} else if msg := sqlProblem(in.DownSQL); msg != "" {
+		fields["down_sql"] = msg
+	}
+	if in.ExecMode == ModeBatch {
+		if !validIdent(in.BatchTable) {
+			fields["batch_table"] = "Nama tabel batch tidak valid"
+		}
+		if !validIdent(in.BatchColumn) {
+			fields["batch_column"] = "Nama kolom batch tidak valid"
+		}
+		if in.BatchSize <= 0 {
+			fields["batch_size"] = "Ukuran batch harus lebih dari 0"
+		}
+		if fields["up_sql"] == "" && !hasBatchRange(in.UpSQL) {
+			fields["up_sql"] = "SQL batch wajib memuat :from dan :to"
+		}
+		if !in.Irreversible && fields["down_sql"] == "" && !hasBatchRange(in.DownSQL) {
+			fields["down_sql"] = "SQL batch wajib memuat :from dan :to"
+		}
 	}
 	if len(fields) > 0 {
 		return apperr.InvalidFields("Input tidak valid", fields)
 	}
 	return nil
+}
+
+func hasBatchRange(sql string) bool {
+	return strings.Contains(sql, ":from") && strings.Contains(sql, ":to")
+}
+
+func validIdent(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 && !unicode.IsLetter(r) && r != '_' {
+			return false
+		}
+		if i > 0 && !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func sqlProblem(sqlText string) string {

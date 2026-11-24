@@ -373,9 +373,9 @@ func TestAPI_Approvals(t *testing.T) {
 		t.Fatalf("inbox kosong = %v", out)
 	}
 
-	// Modul execution (C) belum tersedia: keputusan ditolak dengan alasan yang jelas, bukan 500.
+	// Execution yang tidak ada ditolak tanpa 500.
 	rec, out = c.send(http.MethodPost, "/api/executions/1/approve", map[string]string{"comment": "ok"})
-	expectError(t, rec, out, http.StatusConflict, "conflict", "executions_unavailable")
+	expectError(t, rec, out, http.StatusNotFound, "not_found", "")
 	rec, out = c.send(http.MethodPost, "/api/executions/abc/reject", nil)
 	expectError(t, rec, out, http.StatusNotFound, "not_found", "")
 

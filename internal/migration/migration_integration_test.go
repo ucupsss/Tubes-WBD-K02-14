@@ -3,450 +3,322 @@
 package migration_test
 
 import (
+	"bytes"
 	"context"
-	"io"
+	"encoding/json"
+	"errors"
 	"net/http"
-	"net/url"
-	"os"
+	"net/http/httptest"
 	"strconv"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/access"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/testutil"
 )
 
-func TestExecute_SuccessVersionsAreLinear(t *testing.T) {
-	t.Parallel()
+func TestSubmit_FreezesRevisionAndOpensApproval(t *testing.T) {
 	fx := newFixture(t, "edit")
-	id1 := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "CREATE TABLE widgets (id int)")
-	if _, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, id1); err != nil {
-		t.Fatal(err)
+	m := create(t, fx, "Buat", "CREATE TABLE t (id int)", "DROP TABLE t", false, "")
+	exec := submit(t, fx, m.ID)
+	if exec.Status != migration.StatusPendingReview || exec.Kind != migration.KindApply {
+		t.Fatalf("execution = %+v", exec)
 	}
-	id2 := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "CREATE TABLE gadgets (id int)")
-	if _, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, id2); err != nil {
-		t.Fatal(err)
-	}
-
-	if !tableExists(t, fx.target, "widgets") || !tableExists(t, fx.target, "gadgets") {
-		t.Fatal("expected both tables on the target database")
-	}
-	assertVersions(t, fx.platform, fx.dbID, 1, 2)
-	var applied int
-	if err := fx.target.QueryRow(context.Background(), `SELECT count(*) FROM _dbmp.applied_migrations`).Scan(&applied); err != nil {
-		t.Fatal(err)
-	}
-	if applied != 2 {
-		t.Fatalf("applied rows = %d, want 2", applied)
-	}
-}
-
-func TestExecute_RollsBackEarlierStatement(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "edit")
-	id := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID,
-		"CREATE TABLE t1 (id int); INSERT INTO no_such_table (id) VALUES (1)")
-	res, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, id)
+	var leader *int64
+	var decision string
+	err := fx.platform.QueryRow(context.Background(), `
+		SELECT leader_user_id, decision FROM execution_approvals WHERE execution_id = $1`, exec.ID).
+		Scan(&leader, &decision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Failed || res.Message == "" {
-		t.Fatalf("result = %+v, want failed with a message", res)
+	if leader != nil || decision != "pending" {
+		t.Fatalf("leader = %v decision = %s", leader, decision)
 	}
-	if tableExists(t, fx.target, "t1") {
-		t.Fatal("t1 exists after a failed migration")
+	if _, err := fx.srv.Service.Submit(context.Background(), fx.editor, fx.dbID, m.ID); !isReason(err, "blocked") {
+		t.Fatalf("submit kedua = %v", err)
 	}
-	status, version, msg := migrationRow(t, fx.platform, fx.dbID, id)
-	if status != "failed" || version != nil || msg == nil || *msg == "" {
-		t.Fatalf("status=%s version=%v msg=%v", status, version, msg)
-	}
-	var runs int
-	if err := fx.platform.QueryRow(context.Background(), `SELECT count(*) FROM migration_runs WHERE migration_id = $1 AND status = 'failed'`, id).Scan(&runs); err != nil {
+	if _, err := fx.platform.Exec(context.Background(), `UPDATE executions SET status = 'rejected' WHERE id = $1`, exec.ID); err != nil {
 		t.Fatal(err)
 	}
-	if runs != 1 {
-		t.Fatalf("failed runs = %d, want 1", runs)
+	if _, err := fx.srv.Service.Submit(context.Background(), fx.editor, fx.dbID, m.ID); !isReason(err, "not_submittable") {
+		t.Fatalf("submit setelah ditolak = %v", err)
 	}
-}
-
-func TestExecute_ViewOnlyForbidden(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "view")
-	id := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "CREATE TABLE secret_table (id int)")
-	resp := fx.srv.PostAs(t, fx.editor, "/db/"+itoa(fx.dbID)+"/migrations/"+itoa(id)+"/execute", nil)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
-	}
-	if tableExists(t, fx.target, "secret_table") {
-		t.Fatal("view user changed the target database")
-	}
-}
-
-func TestList_NoGrantForbidden(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "edit")
-	stranger := insertUser(t, fx.platform, "stranger")
-	resp := fx.srv.GetAs(t, stranger, "/db/"+itoa(fx.dbID)+"/migrations")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 403 (%s)", resp.StatusCode, body)
-	}
-}
-
-func TestExecute_ParallelVersionsAreUnique(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "edit")
-	id1 := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "CREATE TABLE alpha (id int)")
-	id2 := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "CREATE TABLE beta (id int)")
-
-	var wg sync.WaitGroup
-	errs := make(chan error, 2)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, id1)
-		errs <- err
-	}()
-	go func() {
-		defer wg.Done()
-		_, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, id2)
-		errs <- err
-	}()
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	assertVersions(t, fx.platform, fx.dbID, 1, 2)
-	if !tableExists(t, fx.target, "alpha") || !tableExists(t, fx.target, "beta") {
-		t.Fatal("parallel execute did not create both tables")
-	}
-}
-
-func TestUpdate_SuccessIsRejected(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "edit")
-	id := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "CREATE TABLE kept (id int)")
-	if _, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, id); err != nil {
-		t.Fatal(err)
-	}
-	form := url.Values{}
-	form.Set("title", "diubah")
-	form.Set("sql_text", "DROP TABLE kept")
-	resp := fx.srv.PostAs(t, fx.editor, "/db/"+itoa(fx.dbID)+"/migrations/"+itoa(id)+"/edit", form)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 409 (%s)", resp.StatusCode, body)
-	}
-	status, version, _ := migrationRow(t, fx.platform, fx.dbID, id)
-	if status != "success" || version == nil || *version != 1 {
-		t.Fatalf("status=%s version=%v", status, version)
-	}
-}
-
-func TestShow_WrongDatabaseIsNotFound(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "edit")
-	otherName, _ := testutil.NewTargetDB(t, "")
-	host, port, user, pass := testEndpoint(t)
-	otherID := insertConnection(t, fx.platform, fx.srv.Secret, fx.editor.UserID, "other-db", host, port, otherName, user, pass)
-	grant(t, fx.platform, fx.groupID, otherID, "view", fx.editor.UserID)
-	id := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "SELECT 1")
-
-	resp := fx.srv.GetAs(t, fx.editor, "/db/"+itoa(otherID)+"/migrations/"+itoa(id))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestExecute_FailedCanBeRetried(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "edit")
-	first := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "CREATE TABLE first_ok (id int)")
-	if _, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, first); err != nil {
-		t.Fatal(err)
-	}
-	retry := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID,
-		"CREATE TABLE rolled (id int); INSERT INTO missing (id) VALUES (1)")
-	res, err := fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, retry)
-	if err != nil || !res.Failed {
-		t.Fatalf("first attempt err=%v result=%+v", err, res)
-	}
-	if err := fx.srv.Service.UpdateDraft(context.Background(), fx.editor, fx.dbID, retry, migration.CreateInput{
-		Title:   "pulih",
-		SQLText: "CREATE TABLE recovered (id int)",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	res, err = fx.srv.Service.Execute(context.Background(), fx.editor, fx.dbID, retry)
-	if err != nil || res.Failed {
-		t.Fatalf("retry err=%v result=%+v", err, res)
-	}
-	if tableExists(t, fx.target, "rolled") {
-		t.Fatal("rolled table survived the failed attempt")
-	}
-	if !tableExists(t, fx.target, "recovered") {
-		t.Fatal("retried migration did not create recovered")
-	}
-	status, version, _ := migrationRow(t, fx.platform, fx.dbID, retry)
-	if status != "success" || version == nil || *version != 2 {
-		t.Fatalf("status=%s version=%v, want success 2", status, version)
-	}
-	assertVersions(t, fx.platform, fx.dbID, 1, 2)
-}
-
-func TestAccess_ViewUserReadsButCannotMutate(t *testing.T) {
-	t.Parallel()
-	fx := newFixture(t, "view")
-
-	resp := fx.srv.GetAs(t, fx.editor, "/db/"+itoa(fx.dbID)+"/migrations")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("history status = %d, want 200 (%s)", resp.StatusCode, body)
-	}
-
-	form := url.Values{}
-	form.Set("title", "tidak boleh")
-	form.Set("sql_text", "CREATE TABLE nope (id int)")
-	resp = fx.srv.PostAs(t, fx.editor, "/db/"+itoa(fx.dbID)+"/migrations", form)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("create status = %d, want 403", resp.StatusCode)
-	}
-	var drafts int
-	if err := fx.platform.QueryRow(context.Background(), `SELECT count(*) FROM migrations WHERE database_id = $1`, fx.dbID).Scan(&drafts); err != nil {
-		t.Fatal(err)
-	}
-	if drafts != 0 {
-		t.Fatalf("view user created %d migrations", drafts)
-	}
-
-	id := testutil.CreateDraft(t, fx.platform, fx.dbID, fx.editor.UserID, "SELECT 1")
-	resp = fx.srv.PostAs(t, fx.editor, "/db/"+itoa(fx.dbID)+"/migrations/"+itoa(id)+"/delete", nil)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("delete status = %d, want 403", resp.StatusCode)
-	}
-	status, _, _ := migrationRow(t, fx.platform, fx.dbID, id)
-	if status != "draft" {
-		t.Fatalf("status = %s, want draft", status)
-	}
-}
-
-func TestExecute_DeadTargetStaysConsistent(t *testing.T) {
-	t.Parallel()
-	platform := testutil.NewPlatformDB(t)
-	srv := testutil.NewServer(t, platform)
-	user := insertUser(t, platform, "alice")
-	groupID := insertGroup(t, platform, "dev")
-	addMember(t, platform, groupID, user.UserID)
-	const secretPass = "s3cret-value"
-	dbID := insertConnection(t, platform, srv.Secret, user.UserID, "dead-db", "127.0.0.1", 1, "postgres", "test", secretPass)
-	grant(t, platform, groupID, dbID, "edit", user.UserID)
-	id := testutil.CreateDraft(t, platform, dbID, user.UserID, "CREATE TABLE should_not (id int)")
-
-	res, err := srv.Service.Execute(context.Background(), user, dbID, id)
+	got, err := fx.srv.Service.Get(context.Background(), fx.dbID, m.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Failed {
-		t.Fatal("expected a failed attempt")
+	if got.Revision.RevisionNo != 1 || got.Revision.FrozenAt == nil || got.Revision.UpSQL != "CREATE TABLE t (id int)" {
+		t.Fatalf("revisi berubah: %+v", got.Revision)
 	}
-	if containsSecret(res.Message, secretPass) {
-		t.Fatalf("user message leaked the password: %q", res.Message)
+}
+
+func TestUpdate_FrozenRevisionCreatesNext(t *testing.T) {
+	fx := newFixture(t, "edit")
+	m := create(t, fx, "Buat", "CREATE TABLE t (id int)", "DROP TABLE t", false, "")
+	submit(t, fx, m.ID)
+	if _, err := fx.srv.Service.Update(context.Background(), fx.editor, fx.dbID, m.ID, migration.Input{
+		Title: "Buat", UpSQL: "CREATE TABLE t2 (id int)", DownSQL: "DROP TABLE t2",
+	}); !isReason(err, "blocked") {
+		t.Fatalf("ubah saat masih review = %v", err)
 	}
-	status, _, msg := migrationRow(t, platform, dbID, id)
-	if status == "running" {
-		t.Fatal("migration left in running")
+	if _, err := fx.platform.Exec(context.Background(), `
+		UPDATE executions SET status = 'rejected' WHERE migration_id = $1`, m.ID); err != nil {
+		t.Fatal(err)
 	}
-	if status != "failed" {
-		t.Fatalf("status = %s, want failed", status)
+	updated, err := fx.srv.Service.Update(context.Background(), fx.editor, fx.dbID, m.ID, migration.Input{
+		Title: "Buat", UpSQL: "CREATE TABLE t2 (id int)", DownSQL: "DROP TABLE t2",
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if msg != nil && containsSecret(*msg, secretPass) {
-		t.Fatalf("stored error leaked the password: %q", *msg)
+	if updated.Revision.RevisionNo != 2 || updated.Revision.FrozenAt != nil {
+		t.Fatalf("revisi baru = %+v", updated.Revision)
+	}
+	var old string
+	if err := fx.platform.QueryRow(context.Background(), `
+		SELECT up_sql FROM migration_revisions WHERE migration_id = $1 AND revision_no = 1`, m.ID).Scan(&old); err != nil {
+		t.Fatal(err)
+	}
+	if old != "CREATE TABLE t (id int)" {
+		t.Fatalf("revisi 1 berubah: %s", old)
+	}
+}
+
+func TestChain_RollbackOnlyTopAndForward(t *testing.T) {
+	fx := newFixture(t, "edit")
+	a := create(t, fx, "A", "CREATE TABLE a (id int)", "DROP TABLE a", false, "")
+	b := create(t, fx, "B", "CREATE TABLE b (id int)", "DROP TABLE b", false, "")
+	ea := submit(t, fx, a.ID)
+	eb := submit(t, fx, b.ID)
+	forceSuccess(t, fx.platform, ea.ID, 1)
+	forceSuccess(t, fx.platform, eb.ID, 2)
+
+	if _, err := fx.srv.Service.Rollback(context.Background(), fx.editor, fx.dbID, a.ID); !isReason(err, "not_top_of_chain") {
+		t.Fatalf("rollback A = %v", err)
+	}
+	rb, err := fx.srv.Service.Rollback(context.Background(), fx.editor, fx.dbID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rb.Kind != migration.KindRollback || rb.RollsBackExecutionID == nil || *rb.RollsBackExecutionID != eb.ID {
+		t.Fatalf("rollback = %+v", rb)
+	}
+
+	forceSuccess(t, fx.platform, rb.ID, 0)
+	clearVersion(t, fx.platform, b.ID)
+	fwd, err := fx.srv.Service.Forward(context.Background(), fx.editor, fx.dbID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fwd.Kind != migration.KindForward || fwd.Status != migration.StatusPendingReview {
+		t.Fatalf("forward = %+v", fwd)
+	}
+	if _, err := fx.srv.Service.Forward(context.Background(), fx.editor, fx.dbID, a.ID); !isReason(err, "already_active") {
+		t.Fatalf("forward A = %v", err)
+	}
+}
+
+func TestRollback_IrreversibleRejected(t *testing.T) {
+	fx := newFixture(t, "edit")
+	m := create(t, fx, "Hapus", "DROP TABLE t", "", true, "tidak ada cadangan")
+	e := submit(t, fx, m.ID)
+	forceSuccess(t, fx.platform, e.ID, 1)
+	if _, err := fx.srv.Service.Rollback(context.Background(), fx.editor, fx.dbID, m.ID); !isReason(err, "irreversible") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestForward_AfterFailure(t *testing.T) {
+	fx := newFixture(t, "edit")
+	m := create(t, fx, "Coba", "CREATE TABLE c (id int)", "DROP TABLE c", false, "")
+	e := submit(t, fx, m.ID)
+	if _, err := fx.platform.Exec(context.Background(), `UPDATE executions SET status = 'failed' WHERE id = $1`, e.ID); err != nil {
+		t.Fatal(err)
+	}
+	fwd, err := fx.srv.Service.Forward(context.Background(), fx.editor, fx.dbID, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fwd.Kind != migration.KindForward {
+		t.Fatalf("kind = %s", fwd.Kind)
+	}
+}
+
+func TestHistory_HideRollback(t *testing.T) {
+	fx := newFixture(t, "edit")
+	a := create(t, fx, "A", "SELECT 1", "SELECT 1", false, "")
+	b := create(t, fx, "B", "SELECT 1", "SELECT 1", false, "")
+	c := create(t, fx, "C", "SELECT 1", "SELECT 1", false, "")
+	e1 := submit(t, fx, a.ID)
+	e2 := submit(t, fx, b.ID)
+	forceSuccess(t, fx.platform, e1.ID, 1)
+	forceSuccess(t, fx.platform, e2.ID, 2)
+	e3, err := fx.srv.Service.Rollback(context.Background(), fx.editor, fx.dbID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forceSuccess(t, fx.platform, e3.ID, 0)
+	clearVersion(t, fx.platform, b.ID)
+	e4, err := fx.srv.Service.Forward(context.Background(), fx.editor, fx.dbID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forceSuccess(t, fx.platform, e4.ID, 2)
+	e5 := submit(t, fx, c.ID)
+	forceSuccess(t, fx.platform, e5.ID, 3)
+
+	hidden := idsOf(t, fx, true)
+	if !sameIDs(hidden, []int64{e1.ID, e4.ID, e5.ID}) {
+		t.Fatalf("hide = %v, want %v", hidden, []int64{e1.ID, e4.ID, e5.ID})
+	}
+	if all := idsOf(t, fx, false); len(all) != 5 {
+		t.Fatalf("semua = %v", all)
+	}
+	if _, err := fx.platform.Exec(context.Background(), `UPDATE executions SET status = 'failed' WHERE id = $1`, e3.ID); err != nil {
+		t.Fatal(err)
+	}
+	afterFail := idsOf(t, fx, true)
+	if !containsID(afterFail, e2.ID) || !containsID(afterFail, e3.ID) {
+		t.Fatalf("rollback gagal harus tetap tampil: %v", afterFail)
+	}
+}
+
+func TestAccess_ViewCannotMutate(t *testing.T) {
+	fx := newFixture(t, "view")
+	rec := jsonAs(t, fx, http.MethodPost, "/api/databases/"+strconv.FormatInt(fx.dbID, 10)+"/migrations", fx.editor,
+		map[string]any{"title": "x", "up_sql": "SELECT 1", "down_sql": "SELECT 1"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	rec = jsonAs(t, fx, http.MethodGet, "/api/databases/"+strconv.FormatInt(fx.dbID, 10)+"/migrations", fx.editor, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d body = %s", rec.Code, rec.Body.String())
 	}
 }
 
 type fixture struct {
 	platform *pgxpool.Pool
-	target   *pgxpool.Pool
 	srv      *testutil.Server
 	dbID     int64
-	groupID  int64
 	editor   authz.Principal
 }
 
 func newFixture(t *testing.T, level string) fixture {
 	t.Helper()
 	platform := testutil.NewPlatformDB(t)
-	targetName, target := testutil.NewTargetDB(t, "")
 	srv := testutil.NewServer(t, platform)
-	user := insertUser(t, platform, "editor")
-	groupID := insertGroup(t, platform, "dev")
-	addMember(t, platform, groupID, user.UserID)
-	host, port, dbUser, dbPass := testEndpoint(t)
-	dbID := insertConnection(t, platform, srv.Secret, user.UserID, "target", host, port, targetName, dbUser, dbPass)
-	grant(t, platform, groupID, dbID, level, user.UserID)
-	return fixture{platform: platform, target: target, srv: srv, dbID: dbID, groupID: groupID, editor: user}
+	userID := testutil.CreateUser(t, platform, "editor", false)
+	user := authz.Principal{UserID: userID, Username: "editor"}
+	groupID := testutil.CreateGroup(t, platform, "dev")
+	testutil.AddMember(t, platform, groupID, userID)
+	dbID := testutil.CreateConnection(t, platform, "target")
+	testutil.Grant(t, platform, groupID, dbID, level)
+	return fixture{platform: platform, srv: srv, dbID: dbID, editor: user}
 }
 
-func insertUser(t *testing.T, db platformdb.DBTX, username string) authz.Principal {
+func create(t *testing.T, fx fixture, title, up, down string, irrev bool, reason string) migration.Migration {
 	t.Helper()
-	hash, err := auth.HashPassword("password123")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var id int64
-	err = db.QueryRow(context.Background(), `
-		INSERT INTO users (username, password_hash, is_admin, is_active)
-		VALUES ($1, $2, false, true)
-		RETURNING id`, username, hash).Scan(&id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return authz.Principal{UserID: id, Username: username}
-}
-
-func insertGroup(t *testing.T, db platformdb.DBTX, name string) int64 {
-	t.Helper()
-	var id int64
-	err := db.QueryRow(context.Background(), `INSERT INTO groups (name) VALUES ($1) RETURNING id`, name).Scan(&id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return id
-}
-
-func addMember(t *testing.T, db platformdb.DBTX, groupID, userID int64) {
-	t.Helper()
-	_, err := db.Exec(context.Background(), `INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, groupID, userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func insertConnection(t *testing.T, pool *pgxpool.Pool, secret []byte, userID int64, name, host string, port int, dbName, user, pass string) int64 {
-	t.Helper()
-	svc := databases.NewService(pool, databases.NewPgRepo(), nil, secret)
-	id, err := svc.Create(context.Background(), databases.CreateInput{
-		Name:      name,
-		Host:      host,
-		Port:      port,
-		DBName:    dbName,
-		Username:  user,
-		Password:  pass,
-		SSLMode:   "disable",
-		CreatedBy: userID,
+	m, err := fx.srv.Service.Create(context.Background(), fx.editor, fx.dbID, migration.Input{
+		Title: title, UpSQL: up, DownSQL: down, Irreversible: irrev, IrreversibleReason: reason,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id
+	return m
 }
 
-func grant(t *testing.T, pool *pgxpool.Pool, groupID, dbID int64, level string, grantedBy int64) {
+func submit(t *testing.T, fx fixture, id int64) migration.Execution {
 	t.Helper()
-	err := access.NewService(pool, access.NewPgRepo(), nil).SaveAccess(context.Background(), access.SaveAccessInput{
-		GroupID:   groupID,
-		Grants:    map[int64]string{dbID: level},
-		GrantedBy: grantedBy,
-	})
+	e, err := fx.srv.Service.Submit(context.Background(), fx.editor, fx.dbID, id)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return e
 }
 
-func testEndpoint(t *testing.T) (host string, port int, user, pass string) {
+func forceSuccess(t *testing.T, db platformdb.DBTX, execID int64, version int32) {
 	t.Helper()
-	u, err := url.Parse(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	host = u.Hostname()
-	port, _ = strconv.Atoi(u.Port())
-	if port == 0 {
-		port = 5432
-	}
-	user = u.User.Username()
-	pass, _ = u.User.Password()
-	return host, port, user, pass
-}
-
-func tableExists(t *testing.T, pool *pgxpool.Pool, name string) bool {
-	t.Helper()
-	var ok bool
-	err := pool.QueryRow(context.Background(), `
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.tables
-			WHERE table_schema = 'public' AND table_name = $1
-		)`, name).Scan(&ok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ok
-}
-
-func migrationRow(t *testing.T, pool *pgxpool.Pool, dbID, id int64) (status string, version *int32, message *string) {
-	t.Helper()
-	err := pool.QueryRow(context.Background(), `
-		SELECT status, version, error_message
-		FROM migrations
-		WHERE id = $1 AND database_id = $2`, id, dbID).Scan(&status, &version, &message)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return status, version, message
-}
-
-func assertVersions(t *testing.T, pool *pgxpool.Pool, dbID int64, want ...int32) {
-	t.Helper()
-	rows, err := pool.Query(context.Background(), `
-		SELECT version FROM migrations
-		WHERE database_id = $1 AND status = 'success'
-		ORDER BY version`, dbID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var got []int32
-	for rows.Next() {
-		var v int32
-		if err := rows.Scan(&v); err != nil {
+	if version == 0 {
+		if _, err := db.Exec(context.Background(), `UPDATE executions SET status = 'success', finished_at = now() WHERE id = $1`, execID); err != nil {
 			t.Fatal(err)
 		}
-		got = append(got, v)
+		return
 	}
-	if err := rows.Err(); err != nil {
+	if _, err := db.Exec(context.Background(), `
+		UPDATE executions SET status = 'success', version_applied = $2, finished_at = now() WHERE id = $1`, execID, version); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(context.Background(), `
+		UPDATE migrations SET version = $2 WHERE id = (SELECT migration_id FROM executions WHERE id = $1)`, execID, version); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func clearVersion(t *testing.T, db platformdb.DBTX, migrationID int64) {
+	t.Helper()
+	if _, err := db.Exec(context.Background(), `UPDATE migrations SET version = NULL WHERE id = $1`, migrationID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func idsOf(t *testing.T, fx fixture, hide bool) []int64 {
+	t.Helper()
+	list, _, err := fx.srv.Service.ListExecutions(context.Background(), fx.dbID, hide, 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, len(list))
+	for i := range list {
+		ids[i] = list[i].ID
+	}
+	return ids
+}
+
+func sameIDs(got, want []int64) bool {
 	if len(got) != len(want) {
-		t.Fatalf("versions = %v, want %v", got, want)
+		return false
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("versions = %v, want %v", got, want)
+			return false
 		}
 	}
+	return true
 }
 
-func containsSecret(msg, secret string) bool {
-	return strings.Contains(msg, secret)
+func containsID(ids []int64, id int64) bool {
+	for _, n := range ids {
+		if n == id {
+			return true
+		}
+	}
+	return false
 }
 
-func itoa(n int64) string {
-	return strconv.FormatInt(n, 10)
+func isReason(err error, reason string) bool {
+	var appErr *apperr.Error
+	return errors.As(err, &appErr) && appErr.Reason == reason
+}
+
+func jsonAs(t *testing.T, fx fixture, method, path string, p authz.Principal, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr *bytes.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rdr = bytes.NewReader(raw)
+	} else {
+		rdr = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	req = req.WithContext(authz.WithPrincipal(req.Context(), p))
+	rec := httptest.NewRecorder()
+	fx.srv.Handler.ServeHTTP(rec, req)
+	return rec
 }
