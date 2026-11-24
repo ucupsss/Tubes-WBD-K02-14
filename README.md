@@ -36,6 +36,7 @@ Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-
 |-------------------------|---------------------------------------------------------------------------|
 | `make up` / `make down` | Menyalakan / mematikan Postgres                                           |
 | `make db-reset`         | Menghapus volume lalu menyalakan ulang dari kosong                        |
+| `make obs-up` / `make obs-down` | Menyalakan / mematikan stack Observability (OTel Collector, Tempo, Loki, Grafana) |
 | `make worker`       | Worker antrian migration, proses terpisah dari API                        |
 | `make k6`           | Stress test k6 pada API baca. Butuh [k6](https://grafana.com/docs/k6/) di PATH |
 | `make web-check`        | Frontend: type-check, unit test, dan build                                |
@@ -227,6 +228,22 @@ Contoh potongan span OpenTelemetry yang berkorelasi dengan log di atas (`TraceID
   ]
 }
 ```
+
+### Stack Observability: OpenTelemetry Collector, Tempo, Loki, dan Korelasi Log-Trace
+
+Untuk menjalankan backend penerima trace dan log beserta korelasi dua arahnya di Grafana (`deploy/observability/`):
+
+```bash
+make obs-up
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export LOKI_PUSH_URL=http://localhost:3100
+make run     # terminal 1
+make worker  # terminal 2
+```
+
+- **OpenTelemetry Collector** (`:4317` gRPC, `:4318` HTTP) menerima span OTLP dari API server dan worker lalu meneruskannya ke **Grafana Tempo** (`:3200`), serta menerima log OTLP dan meneruskannya ke **Grafana Loki** (`:3100`).
+- **Pembatasan kardinalitas label**: label stream di Loki dibatasi hanya pada `service` (`dbmp-server` / `dbmp-worker`) dan `level` (`INFO` / `WARN` / `ERROR`). Nilai dengan kardinalitas tinggi seperti `user_id`, `job_id`, `execution_id`, `trace_id`, atau teks `SQL` disimpan di dalam body JSON log, bukan sebagai label indeks.
+- **Korelasi Log ↔ Trace di Grafana** (`http://localhost:3000`): datasource Loki telah dikonfigurasi dengan *Derived Field* `TraceID` (`"trace_id":"([a-f0-9]{32})"`) yang menautkan langsung baris log ke tampilan waterfall span di Tempo, dan datasource Tempo memiliki *Traces to Logs* yang memfilter log di Loki berdasarkan `trace_id` yang sama.
 
 ## Mode Eksekusi per Batch (`internal/batch`)
 

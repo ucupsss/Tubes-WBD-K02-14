@@ -19,7 +19,9 @@ import (
 
 func main() {
 	cfg := config.MustLoad()
-	logger := logx.New(os.Stdout, slog.LevelInfo)
+	logOut, closeLogs := telemetry.LogOutput(os.Stdout, "dbmp-server")
+	defer func() { _ = closeLogs() }()
+	logger := logx.New(logOut, slog.LevelInfo)
 	slog.SetDefault(logger)
 
 	ctx := context.Background()

@@ -26,7 +26,9 @@ import (
 
 func main() {
 	cfg := config.MustLoad()
-	logger := logx.New(os.Stdout, slog.LevelInfo)
+	logOut, closeLogs := telemetry.LogOutput(os.Stdout, "dbmp-worker")
+	defer func() { _ = closeLogs() }()
+	logger := logx.New(logOut, slog.LevelInfo)
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

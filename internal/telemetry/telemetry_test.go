@@ -205,3 +205,53 @@ func TestPgxTracer_LogsQueryAndSQLStateWithRedaction(t *testing.T) {
 		t.Fatalf("password DSN bocor di log: %s", lines[2])
 	}
 }
+
+func TestOTLPExporterAndLogForwarder(t *testing.T) {
+	var traceBodies, otlpLogBodies, lokiBodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r.Body)
+		switch r.URL.Path {
+		case "/v1/traces":
+			traceBodies = append(traceBodies, buf.String())
+		case "/v1/logs":
+			otlpLogBodies = append(otlpLogBodies, buf.String())
+		case "/loki/api/v1/push":
+			lokiBodies = append(lokiBodies, buf.String())
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	shutdown, err := Init(context.Background(), Config{
+		ServiceName:  "dbmp-test",
+		OTLPEndpoint: srv.URL,
+		Disabled:     true,
+		Sync:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	fwd := NewLogForwarder("dbmp-test", srv.URL, srv.URL)
+	var logBuf bytes.Buffer
+	logger := logx.New(&logBuf, slog.LevelInfo)
+
+	ctx, span := Tracer().Start(logx.WithCorrelation(context.Background(), "corr-otlp-1"), "job.process")
+	traceID := span.SpanContext().TraceID().String()
+	logger.InfoContext(ctx, "job.claimed", "job_id", 99)
+	_, _ = fwd.Write(logBuf.Bytes())
+	span.End()
+	_ = fwd.Close()
+
+	if len(traceBodies) == 0 || !strings.Contains(traceBodies[0], traceID) {
+		t.Fatalf("OTLP trace tidak terkirim atau tidak memuat traceID %s: %v", traceID, traceBodies)
+	}
+	if len(otlpLogBodies) == 0 || !strings.Contains(otlpLogBodies[0], traceID) {
+		t.Fatalf("OTLP log tidak memuat traceID %s: %v", traceID, otlpLogBodies)
+	}
+	if len(lokiBodies) == 0 || !strings.Contains(lokiBodies[0], `"service":"dbmp-test"`) || !strings.Contains(lokiBodies[0], traceID) {
+		t.Fatalf("Loki log tidak memuat stream/traceID: %v", lokiBodies)
+	}
+}

@@ -1,4 +1,4 @@
-.PHONY: up down db-reset run worker seed dataset k6 fmt lint test test-integration check cover web-install web-dev web-build web-lint web-test web-check
+.PHONY: up down db-reset obs-up obs-down run worker seed dataset k6 fmt lint test test-integration check cover web-install web-dev web-build web-lint web-test web-check
 
 up:
 	docker compose up -d
@@ -8,6 +8,12 @@ down:
 
 db-reset:
 	docker compose down -v && docker compose up -d
+
+obs-up:
+	docker compose --profile obs up -d
+
+obs-down:
+	docker compose --profile obs down
 
 run:
 	go run ./cmd/server

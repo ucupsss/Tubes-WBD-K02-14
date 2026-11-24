@@ -30,6 +30,9 @@ type Config struct {
 	ServiceName string
 	// Writer adalah tujuan exporter console/stdout. Bila nil dan Disabled=false, menggunakan os.Stdout.
 	Writer io.Writer
+	// OTLPEndpoint adalah alamat OpenTelemetry Collector HTTP (mis. "http://localhost:4318").
+	// Bila kosong, dibaca dari env OTEL_EXPORTER_OTLP_ENDPOINT.
+	OTLPEndpoint string
 	// Disabled menonaktifkan penulisan span ke stdout (mis. di unit test yang hanya butuh trace_id/span_id di memori).
 	Disabled bool
 	// Sync mengekspor span secara sinkron (SimpleSpanProcessor), berguna untuk pengujian deterministik.
@@ -100,6 +103,19 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		opts = append(opts, sdktrace.WithBatcher(exp))
 	}
 
+	otlpEP := cfg.OTLPEndpoint
+	if otlpEP == "" {
+		otlpEP = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+	if otlpEP != "" {
+		otlpExp := newOTLPHTTPExporter(otlpEP, svcName)
+		if cfg.Sync {
+			opts = append(opts, sdktrace.WithSyncer(otlpExp))
+		} else {
+			opts = append(opts, sdktrace.WithBatcher(otlpExp))
+		}
+	}
+
 	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -108,6 +124,19 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	))
 
 	return tp.Shutdown, nil
+}
+
+// LogOutput mengembalikan io.Writer untuk logx.New yang menulis ke base (mis. os.Stdout)
+// dan, apabila OTEL_EXPORTER_OTLP_ENDPOINT atau LOKI_PUSH_URL diset, juga meneruskan log JSON
+// secara asinkron ke OpenTelemetry Collector / Loki untuk korelasi log-trace.
+func LogOutput(base io.Writer, serviceName string) (io.Writer, func() error) {
+	otlpEP := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	lokiURL := os.Getenv("LOKI_PUSH_URL")
+	if otlpEP == "" && lokiURL == "" {
+		return base, func() error { return nil }
+	}
+	fwd := NewLogForwarder(serviceName, otlpEP, lokiURL)
+	return io.MultiWriter(base, fwd), fwd.Close
 }
 
 // Tracer mengembalikan tracer utama aplikasi.
