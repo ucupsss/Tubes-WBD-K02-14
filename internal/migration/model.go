@@ -28,6 +28,7 @@ const (
 	StatusCancelled         = "cancelled"
 )
 
+// Mode eksekusi pada revisi. Batch menunda SQL sampai paket batch tersedia.
 const (
 	ModeNormal = "normal"
 	ModeBatch  = "batch"
@@ -111,6 +112,7 @@ type Page struct {
 	Total    int
 }
 
+// Kesalahan domain migration. Reason pada Conflict dipakai sebagai details.reason di API.
 var (
 	ErrNotFound       = apperr.NotFound("Migration tidak ditemukan")
 	ErrExecNotFound   = apperr.NotFound("Eksekusi tidak ditemukan")

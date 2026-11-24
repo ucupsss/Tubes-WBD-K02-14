@@ -8,6 +8,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 )
 
+// Status job di tabel migration_jobs.
 const (
 	StatusQueued  = "queued"
 	StatusRunning = "running"
@@ -48,6 +49,7 @@ type SQLError struct {
 	Message  string
 }
 
+// Error mengembalikan pesan SQL, atau SQLState bila pesan kosong.
 func (e *SQLError) Error() string {
 	if e.Message != "" {
 		return e.Message

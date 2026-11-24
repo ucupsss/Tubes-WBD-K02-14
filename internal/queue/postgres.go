@@ -18,6 +18,7 @@ type PgQueue struct {
 	stale time.Duration
 }
 
+// New membuat antrian di pool platform. Job running yang diam lebih dari 30 detik boleh diambil lagi.
 func New(pool *pgxpool.Pool) *PgQueue {
 	return &PgQueue{pool: pool, stale: 30 * time.Second}
 }
@@ -175,6 +176,7 @@ func (q *PgQueue) JobStatus(ctx context.Context, db platformdb.DBTX, execID int6
 	return status, nil
 }
 
+// ErrNotFound berarti baris migration_jobs tidak ada.
 var (
 	ErrNotFound = fmt.Errorf("queue: job tidak ditemukan")
 	errRunning  = fmt.Errorf("queue: job sedang berjalan")

@@ -1,3 +1,4 @@
+// Program worker mengambil job migration, mengunci database target, lalu menjalankan SQL.
 package main
 
 import (

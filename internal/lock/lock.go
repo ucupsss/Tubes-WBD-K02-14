@@ -40,6 +40,7 @@ type PgLocker struct {
 	pool *pgxpool.Pool
 }
 
+// New membuat locker di atas tabel database_locks.
 func New(pool *pgxpool.Pool) *PgLocker { return &PgLocker{pool: pool} }
 
 type pgLease struct {
@@ -50,7 +51,10 @@ type pgLease struct {
 	lease    time.Duration
 }
 
-func (l *pgLease) DatabaseID() int64  { return l.dbID }
+// DatabaseID mengembalikan database yang dikunci.
+func (l *pgLease) DatabaseID() int64 { return l.dbID }
+
+// ExecutionID mengembalikan execution pemegang kunci.
 func (l *pgLease) ExecutionID() int64 { return l.execID }
 
 // Acquire mengambil kunci. Execution yang sama boleh memperbarui lease-nya.
@@ -87,6 +91,7 @@ func (l *PgLocker) Acquire(ctx context.Context, dbID, execID int64, workerID str
 	return &pgLease{pool: l.pool, dbID: dbID, execID: execID, workerID: workerID, lease: lease}, nil
 }
 
+// Heartbeat memperpanjang lease kunci ini. ErrBusy bila pemegangnya sudah berganti.
 func (l *pgLease) Heartbeat(ctx context.Context) error {
 	tag, err := l.pool.Exec(ctx, `
 		UPDATE database_locks
@@ -102,6 +107,7 @@ func (l *pgLease) Heartbeat(ctx context.Context) error {
 	return nil
 }
 
+// Release melepas kunci bila masih dipegang worker yang sama.
 func (l *pgLease) Release(ctx context.Context) error {
 	_, err := l.pool.Exec(ctx, `
 		DELETE FROM database_locks

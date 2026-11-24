@@ -16,6 +16,7 @@ type PgRepo struct {
 	db platformdb.DBTX
 }
 
+// NewPgRepo membuat repositori tanpa koneksi tetap. Bind memasang pool untuk panggilan worker.
 func NewPgRepo() *PgRepo { return &PgRepo{} }
 
 // Bind mengembalikan repo yang memakai koneksi ini untuk panggilan worker.
@@ -35,6 +36,7 @@ const migrationFrom = `
 	JOIN migration_revisions r ON r.id = m.current_revision_id
 	JOIN users u ON u.id = m.created_by`
 
+// Create menyisipkan migration dan revisi pertama, lalu menautkan current_revision_id.
 func (r *PgRepo) Create(ctx context.Context, db platformdb.DBTX, databaseID, userID int64, title string, rev Revision) (Migration, error) {
 	var id int64
 	err := db.QueryRow(ctx, `
@@ -74,6 +76,7 @@ func insertRevision(ctx context.Context, db platformdb.DBTX, rev Revision) (int6
 	return id, nil
 }
 
+// GetMigration membaca migration beserta revisi yang sedang berlaku.
 func (r *PgRepo) GetMigration(ctx context.Context, db platformdb.DBTX, databaseID, id int64) (Migration, error) {
 	row := db.QueryRow(ctx, `SELECT `+migrationCols+migrationFrom+` WHERE m.id = $1 AND m.database_id = $2`, id, databaseID)
 	m, err := scanMigration(row)
@@ -86,6 +89,7 @@ func (r *PgRepo) GetMigration(ctx context.Context, db platformdb.DBTX, databaseI
 	return m, nil
 }
 
+// List mengembalikan satu halaman migration dan jumlah seluruh baris pada database itu.
 func (r *PgRepo) List(ctx context.Context, db platformdb.DBTX, databaseID int64, limit, offset int) ([]Migration, int, error) {
 	var total int
 	if err := db.QueryRow(ctx, `SELECT count(*) FROM migrations WHERE database_id = $1`, databaseID).Scan(&total); err != nil {
@@ -114,6 +118,7 @@ func (r *PgRepo) List(ctx context.Context, db platformdb.DBTX, databaseID int64,
 	return list, total, nil
 }
 
+// UpdateTitle mengubah judul migration.
 func (r *PgRepo) UpdateTitle(ctx context.Context, db platformdb.DBTX, databaseID, id, userID int64, title string) error {
 	tag, err := db.Exec(ctx, `
 		UPDATE migrations SET title = $1, updated_by = $2, updated_at = now()
@@ -127,6 +132,7 @@ func (r *PgRepo) UpdateTitle(ctx context.Context, db platformdb.DBTX, databaseID
 	return nil
 }
 
+// UpdateRevision menulis ulang revisi yang frozen_at-nya masih kosong.
 func (r *PgRepo) UpdateRevision(ctx context.Context, db platformdb.DBTX, rev Revision) error {
 	tag, err := db.Exec(ctx, `
 		UPDATE migration_revisions
@@ -144,6 +150,7 @@ func (r *PgRepo) UpdateRevision(ctx context.Context, db platformdb.DBTX, rev Rev
 	return nil
 }
 
+// AddRevision menambah revisi baru dan menjadikannya revisi yang berlaku.
 func (r *PgRepo) AddRevision(ctx context.Context, db platformdb.DBTX, databaseID, migrationID int64, rev Revision) error {
 	revID, err := insertRevision(ctx, db, rev)
 	if err != nil {
@@ -161,6 +168,7 @@ func (r *PgRepo) AddRevision(ctx context.Context, db platformdb.DBTX, databaseID
 	return nil
 }
 
+// DeleteDraft melepas tautan revisi lalu menghapus migration yang belum punya execution.
 func (r *PgRepo) DeleteDraft(ctx context.Context, db platformdb.DBTX, databaseID, id int64) error {
 	if _, err := db.Exec(ctx, `UPDATE migrations SET current_revision_id = NULL WHERE id = $1 AND database_id = $2`, id, databaseID); err != nil {
 		return fmt.Errorf("migration.DeleteDraft unlink: %w", err)
@@ -230,6 +238,7 @@ func (r *PgRepo) LockHead(ctx context.Context, db platformdb.DBTX, databaseID, i
 	return m, h, nil
 }
 
+// Freeze menandai revisi tidak boleh diubah lagi. Dipanggil saat submit pertama.
 func (r *PgRepo) Freeze(ctx context.Context, db platformdb.DBTX, revisionID int64) error {
 	_, err := db.Exec(ctx, `UPDATE migration_revisions SET frozen_at = now() WHERE id = $1 AND frozen_at IS NULL`, revisionID)
 	if err != nil {
@@ -238,6 +247,7 @@ func (r *PgRepo) Freeze(ctx context.Context, db platformdb.DBTX, revisionID int6
 	return nil
 }
 
+// InsertExecution menyimpan satu permintaan apply, forward, atau rollback.
 func (r *PgRepo) InsertExecution(ctx context.Context, db platformdb.DBTX, e Execution) (int64, error) {
 	var id int64
 	err := db.QueryRow(ctx, `
@@ -255,6 +265,7 @@ func (r *PgRepo) InsertExecution(ctx context.Context, db platformdb.DBTX, e Exec
 	return id, nil
 }
 
+// ActiveSuccessID mengembalikan execution apply/forward sukses yang belum dibatalkan rollback sukses.
 func (r *PgRepo) ActiveSuccessID(ctx context.Context, db platformdb.DBTX, migrationID int64) (int64, error) {
 	var id int64
 	err := db.QueryRow(ctx, `
@@ -274,6 +285,7 @@ func (r *PgRepo) ActiveSuccessID(ctx context.Context, db platformdb.DBTX, migrat
 	return id, nil
 }
 
+// ListExecutions membaca riwayat. hide menyaring pasangan rollback sukses lewat rolls_back_execution_id.
 func (r *PgRepo) ListExecutions(ctx context.Context, db platformdb.DBTX, databaseID int64, hide bool, limit, offset int) ([]Execution, int, error) {
 	filter := `
 		WHERE e.database_id = $1
@@ -303,6 +315,7 @@ func (r *PgRepo) ListExecutions(ctx context.Context, db platformdb.DBTX, databas
 	return list, total, nil
 }
 
+// GetExecution membaca satu execution beserta judul migration-nya.
 func (r *PgRepo) GetExecution(ctx context.Context, db platformdb.DBTX, id int64) (Execution, error) {
 	row := db.QueryRow(ctx, `
 		SELECT `+executionCols+`
@@ -320,6 +333,7 @@ func (r *PgRepo) GetExecution(ctx context.Context, db platformdb.DBTX, id int64)
 	return e, nil
 }
 
+// ListAttempts mengembalikan percobaan teknis satu execution, terurut nomor attempt.
 func (r *PgRepo) ListAttempts(ctx context.Context, db platformdb.DBTX, executionID int64) ([]Attempt, error) {
 	rows, err := db.Query(ctx, `
 		SELECT id, execution_id, attempt_no, worker_id, status, sql_executed, sqlstate, error_message,
@@ -360,6 +374,7 @@ func (r *PgRepo) Get(ctx context.Context, db platformdb.DBTX, execID int64) (app
 	return info, nil
 }
 
+// SetStatus mengubah status execution. Dipakai approval saat approve, reject, dan revoke.
 func (r *PgRepo) SetStatus(ctx context.Context, db platformdb.DBTX, execID int64, status string) error {
 	tag, err := db.Exec(ctx, `UPDATE executions SET status = $1 WHERE id = $2`, status, execID)
 	if err != nil {
@@ -371,6 +386,7 @@ func (r *PgRepo) SetStatus(ctx context.Context, db platformdb.DBTX, execID int64
 	return nil
 }
 
+// SetRound menyimpan nomor ronde approval yang sedang berlaku.
 func (r *PgRepo) SetRound(ctx context.Context, db platformdb.DBTX, execID int64, round int) error {
 	tag, err := db.Exec(ctx, `UPDATE executions SET approval_round = $1 WHERE id = $2`, round, execID)
 	if err != nil {

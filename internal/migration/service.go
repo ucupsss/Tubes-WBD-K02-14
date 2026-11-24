@@ -26,6 +26,7 @@ type Service struct {
 	jobs   *queue.PgQueue
 }
 
+// NewService merakit layanan migration. rounds boleh nil hanya untuk tes yang tidak mengajukan review.
 func NewService(pool *pgxpool.Pool, repo *PgRepo, rounds RoundOpener) *Service {
 	if repo == nil {
 		repo = NewPgRepo()
@@ -37,6 +38,7 @@ func (s *Service) inTx(ctx context.Context, fn func(q platformdb.DBTX) error) er
 	return platformdb.WithTx(ctx, s.pool, func(tx pgx.Tx) error { return fn(tx) })
 }
 
+// Create menyimpan migration baru beserta revisi pertama yang belum diajukan.
 func (s *Service) Create(ctx context.Context, p authz.Principal, databaseID int64, in Input) (Migration, error) {
 	in = in.Normalized()
 	if err := in.Validate(); err != nil {
@@ -54,6 +56,7 @@ func (s *Service) Create(ctx context.Context, p authz.Principal, databaseID int6
 	return created, err
 }
 
+// Update mengubah revisi yang belum dibekukan, atau membuat revisi berikutnya bila revisi kini sudah diajukan.
 func (s *Service) Update(ctx context.Context, p authz.Principal, databaseID, id int64, in Input) (Migration, error) {
 	in = in.Normalized()
 	if err := in.Validate(); err != nil {
@@ -90,6 +93,7 @@ func (s *Service) Update(ctx context.Context, p authz.Principal, databaseID, id 
 	return updated, err
 }
 
+// Delete menghapus migration yang belum pernah diajukan.
 func (s *Service) Delete(ctx context.Context, databaseID, id int64) error {
 	return s.inTx(ctx, func(q platformdb.DBTX) error {
 		if _, h, err := s.repo.LockHead(ctx, q, databaseID, id); err != nil {
@@ -101,23 +105,28 @@ func (s *Service) Delete(ctx context.Context, databaseID, id int64) error {
 	})
 }
 
+// Get membaca satu migration pada database tersebut.
 func (s *Service) Get(ctx context.Context, databaseID, id int64) (Migration, error) {
 	return s.repo.GetMigration(ctx, s.pool, databaseID, id)
 }
 
+// List mengembalikan migration pada satu database, terurut versi lalu id, plus jumlah total.
 func (s *Service) List(ctx context.Context, databaseID int64, page, size int) ([]Migration, int, error) {
 	page, size = normalizePage(page, size)
 	return s.repo.List(ctx, s.pool, databaseID, size, (page-1)*size)
 }
 
+// Submit membekukan revisi saat ini dan membuka execution apply yang menunggu approval.
 func (s *Service) Submit(ctx context.Context, p authz.Principal, databaseID, id int64) (Execution, error) {
 	return s.open(ctx, p, databaseID, id, KindApply)
 }
 
+// Forward mengajukan ulang SQL revisi yang sudah dibekukan setelah gagal atau di-rollback.
 func (s *Service) Forward(ctx context.Context, p authz.Principal, databaseID, id int64) (Execution, error) {
 	return s.open(ctx, p, databaseID, id, KindForward)
 }
 
+// Rollback mengajukan SQL down untuk migration teratas pada rantai aktif.
 func (s *Service) Rollback(ctx context.Context, p authz.Principal, databaseID, id int64) (Execution, error) {
 	return s.open(ctx, p, databaseID, id, KindRollback)
 }
@@ -186,11 +195,13 @@ func (s *Service) open(ctx context.Context, p authz.Principal, databaseID, id in
 	return s.repo.GetExecution(ctx, s.pool, execID)
 }
 
+// ListExecutions membaca riwayat. hide menyembunyikan pasangan rollback sukses berdasarkan execution id.
 func (s *Service) ListExecutions(ctx context.Context, databaseID int64, hide bool, page, size int) ([]Execution, int, error) {
 	page, size = normalizePage(page, size)
 	return s.repo.ListExecutions(ctx, s.pool, databaseID, hide, size, (page-1)*size)
 }
 
+// GetExecution membaca satu execution beserta attempt teknisnya.
 func (s *Service) GetExecution(ctx context.Context, id int64) (Execution, []Attempt, error) {
 	e, err := s.repo.GetExecution(ctx, s.pool, id)
 	if err != nil {

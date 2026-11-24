@@ -42,6 +42,7 @@ func CreateUser(t *testing.T, db platformdb.DBTX, username string, isAdmin bool)
 	return id
 }
 
+// CreateGroup menyisipkan group dan mengembalikan id-nya.
 func CreateGroup(t *testing.T, db platformdb.DBTX, name string) int64 {
 	t.Helper()
 	var id int64
@@ -53,6 +54,7 @@ func CreateGroup(t *testing.T, db platformdb.DBTX, name string) int64 {
 	return id
 }
 
+// AddMember menambahkan user ke group. Pemanggilan ulang tidak menggagalkan tes.
 func AddMember(t *testing.T, db platformdb.DBTX, groupID, userID int64) {
 	t.Helper()
 	if _, err := db.Exec(context.Background(),

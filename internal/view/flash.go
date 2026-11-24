@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// FlashCookie adalah nama cookie pesan sekali-tayang setelah redirect.
 const FlashCookie = "dbmp_flash"
 
 // EncodeFlash packs a flash message into a cookie value.
