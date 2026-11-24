@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -160,8 +161,10 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 			state, msg = pgErr.Code, pgErr.Message
 		}
 		if state != "" && queue.Retryable(state) {
-			_ = e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", state, msg, sqlText)
-			return &queue.SQLError{SQLState: state, Message: msg}
+			if err := e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", state, msg, sqlText); err != nil {
+				return err
+			}
+			return &queue.SQLError{SQLState: state, Message: msg, Recorded: true}
 		}
 		return e.fail(ctx, w, job, state, msg, sqlText)
 	}
@@ -293,7 +296,8 @@ func (e *Executor) succeed(ctx context.Context, w Work, job queue.Job, sqlText s
 		version = next
 	}
 	if err := e.repo.MarkApplied(ctx, w, version); err != nil {
-		return err
+		// Target sudah commit. Jangan menandai execution gagal; catatan platform dicoba lagi.
+		return &worker.Halt{Disposition: worker.DispositionRetry, Message: "Gagal mencatat hasil di database platform", Recorded: true}
 	}
 	_ = e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "success", "", "", sqlText)
 	action := "finish"
@@ -345,8 +349,11 @@ func haltFail(code, message string) error {
 	return &worker.Halt{Disposition: worker.DispositionDead, SQLState: code, Message: message}
 }
 
+// heartbeatEvery bisa dipendekkan tes. Produksi memakai jarak heartbeat kunci.
+var heartbeatEvery = lock.HeartbeatEvery
+
 func heartbeat(ctx context.Context, lease lock.Lease) {
-	t := time.NewTicker(lock.HeartbeatEvery)
+	t := time.NewTicker(heartbeatEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -355,7 +362,7 @@ func heartbeat(ctx context.Context, lease lock.Lease) {
 		case <-t.C:
 			if err := lease.Heartbeat(ctx); err != nil {
 				slog.WarnContext(ctx, "lock.heartbeat", "err", err, "database", lease.DatabaseID(), "execution_id", lease.ExecutionID())
-				return
+				continue
 			}
 		}
 	}
@@ -439,10 +446,17 @@ func execSimple(ctx context.Context, tx pgx.Tx, sql string) error {
 	return nil
 }
 
+// uncertainErr hanya untuk hasil commit yang benar-benar belum pasti: kelas 08,
+// shutdown server, atau deadline. Deadlock, serialization failure, dan too_many_connections
+// sudah pasti membatalkan transaksi, jadi tidak masuk sini.
 func uncertainErr(err error) bool {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && queue.Retryable(pgErr.Code) {
-		return true
+	if errors.As(err, &pgErr) {
+		code := strings.ToUpper(strings.TrimSpace(pgErr.Code))
+		if strings.HasPrefix(code, "08") || code == "57P01" {
+			return true
+		}
+		return false
 	}
 	return errors.Is(err, context.DeadlineExceeded)
 }

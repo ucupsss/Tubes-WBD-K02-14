@@ -43,9 +43,11 @@ type Queue interface {
 }
 
 // SQLError adalah kegagalan SQL yang boleh di-retry hanya bila SQLState-nya sementara.
+// Recorded berarti percobaan sudah ditulis, jadi worker tidak menyisipkan baris kedua.
 type SQLError struct {
 	SQLState string
 	Message  string
+	Recorded bool
 }
 
 func (e *SQLError) Error() string {

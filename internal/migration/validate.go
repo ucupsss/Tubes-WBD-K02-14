@@ -90,7 +90,60 @@ func (in Input) Validate() error {
 }
 
 func hasBatchRange(sql string) bool {
-	return strings.Contains(sql, ":from") && strings.Contains(sql, ":to")
+	from, to := false, false
+	for i := 0; i < len(sql); {
+		if isSkippable(sql, i) {
+			next, _, err := skipToken(sql, i)
+			if err != nil || next <= i {
+				return false
+			}
+			i = next
+			continue
+		}
+		if word, ok := batchPlaceholder(sql, i); ok {
+			switch word {
+			case ":from":
+				from = true
+			case ":to":
+				to = true
+			}
+			i += len(word)
+			continue
+		}
+		i++
+	}
+	return from && to
+}
+
+func isSkippable(s string, i int) bool {
+	if i >= len(s) {
+		return false
+	}
+	if s[i] == '-' && i+1 < len(s) && s[i+1] == '-' {
+		return true
+	}
+	if s[i] == '/' && i+1 < len(s) && s[i+1] == '*' {
+		return true
+	}
+	if s[i] == '\'' || s[i] == '"' {
+		return true
+	}
+	_, _, ok := matchDollar(s, i)
+	return ok
+}
+
+func batchPlaceholder(s string, i int) (string, bool) {
+	for _, word := range []string{":from", ":to"} {
+		if !strings.HasPrefix(s[i:], word) {
+			continue
+		}
+		end := i + len(word)
+		if end < len(s) && isIdentCont(s[end]) {
+			continue
+		}
+		return word, true
+	}
+	return "", false
 }
 
 func validIdent(s string) bool {

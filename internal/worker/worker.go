@@ -1,7 +1,7 @@
 // Package worker mengambil job dari antrian dan mencatat hasilnya.
 //
-// Percobaan SQL target dilakukan oleh Runner. Pada paket ini runner bawaan
-// belum menjalankan SQL; lock dan eksekusi menyusul.
+// Percobaan SQL target dilakukan oleh Runner. Runner bawaan menolak eksekusi
+// sampai proses worker memasang executor migration.
 //
 // Pemilik: C.
 package worker
@@ -136,7 +136,8 @@ func Process(ctx context.Context, jobs Jobs, exec Executions, runner Runner, wor
 		return err
 	}
 	switch status {
-	case "cancelled", "success", "failed", "rejected", "pending_review", "approved":
+	case "cancelled", "success", "failed", "rejected", "pending_review", "approved", "partial", "partially_reverted":
+		// partial hanya boleh jalan lagi lewat resume, yang mengembalikannya ke queued.
 		return jobs.Complete(ctx, job.ID, queue.StatusDone)
 	case "queued":
 		ok, err := exec.MarkRunning(ctx, job.ExecutionID)
@@ -166,8 +167,10 @@ func Process(ctx context.Context, jobs Jobs, exec Executions, runner Runner, wor
 	if runErr != nil {
 		attemptStatus = "failed"
 	}
-	if err := exec.InsertAttempt(ctx, job.ExecutionID, job.Attempts, workerID, attemptStatus, sqlstate, message, ""); err != nil {
-		return err
+	if sqlErr == nil || !sqlErr.Recorded {
+		if err := exec.InsertAttempt(ctx, job.ExecutionID, job.Attempts, workerID, attemptStatus, sqlstate, message, ""); err != nil {
+			return err
+		}
 	}
 	if runErr == nil {
 		if err := exec.MarkSucceeded(ctx, job.ExecutionID); err != nil {

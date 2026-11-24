@@ -32,7 +32,7 @@ func Load(ctx context.Context, pool *pgxpool.Pool, n int) error {
 	if n <= 0 {
 		return fmt.Errorf("dataset: jumlah baris harus lebih dari 0")
 	}
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS big_events`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS big_events CASCADE`); err != nil {
 		return fmt.Errorf("dataset: drop: %w", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -62,7 +62,22 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, n int) error {
 		return fmt.Errorf("dataset: count: %w", err)
 	}
 	if count == int64(n) {
-		return nil
+		var shaped bool
+		err = pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'big_events'
+				  AND column_name = 'id' AND data_type = 'bigint')
+			AND EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'big_events'
+				  AND column_name = 'payload' AND data_type = 'integer')`).Scan(&shaped)
+		if err != nil {
+			return fmt.Errorf("dataset: bentuk tabel: %w", err)
+		}
+		if shaped {
+			return nil
+		}
 	}
 	return Load(ctx, pool, n)
 }

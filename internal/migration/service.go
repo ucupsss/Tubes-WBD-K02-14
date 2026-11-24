@@ -150,11 +150,12 @@ func (s *Service) open(ctx context.Context, p authz.Principal, databaseID, id in
 			ApprovalRound: 1,
 		}
 		if kind == KindRollback {
-			target, err := s.repo.ActiveSuccessID(ctx, q, id)
+			target, revisionID, err := s.repo.ActiveSuccessID(ctx, q, id)
 			if err != nil {
 				return err
 			}
 			e.RollsBackExecutionID = &target
+			e.RevisionID = revisionID
 		}
 		execID, err = s.repo.InsertExecution(ctx, q, e)
 		if err != nil {

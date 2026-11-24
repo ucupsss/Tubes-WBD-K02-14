@@ -228,26 +228,40 @@ func (r *PgRepo) LoadWork(ctx context.Context, execID int64) (Work, error) {
 	return w, nil
 }
 
-// MarkApplied mencatat sukses di platform: posisi rantai untuk apply/forward, atau pengosongan untuk rollback.
+// MarkApplied mencatat sukses di platform: posisi rantai dan status execution dalam satu pernyataan,
+// supaya kegagalan di salah satunya tidak meninggalkan version terisi sementara execution gagal.
 func (r *PgRepo) MarkApplied(ctx context.Context, w Work, version int32) error {
 	if err := r.needDB(); err != nil {
 		return err
 	}
-	if w.Kind == KindRollback {
-		if _, err := r.db.Exec(ctx, `UPDATE migrations SET version = NULL WHERE id = $1 AND database_id = $2`, w.MigrationID, w.DatabaseID); err != nil {
-			return fmt.Errorf("migration.MarkApplied clear: %w", err)
-		}
-	} else if _, err := r.db.Exec(ctx, `
-		UPDATE migrations SET version = $1 WHERE id = $2 AND database_id = $3 AND version IS NULL`,
-		version, w.MigrationID, w.DatabaseID); err != nil {
-		return fmt.Errorf("migration.MarkApplied version: %w", err)
-	}
-	_, err := r.db.Exec(ctx, `
+	sqlText := `
+		WITH chain AS (
+			UPDATE migrations SET version = $4
+			WHERE id = $2 AND database_id = $3 AND (version IS NULL OR version = $4)
+			RETURNING id
+		)
 		UPDATE executions
-		SET status = 'success', finished_at = now(), version_applied = $2, error_code = NULL, error_message = NULL
-		WHERE id = $1`, w.ExecutionID, version)
+		SET status = 'success', finished_at = now(), version_applied = $4,
+		    error_code = NULL, error_message = NULL
+		WHERE id = $1 AND EXISTS (SELECT 1 FROM chain)`
+	if w.Kind == KindRollback {
+		sqlText = `
+			WITH chain AS (
+				UPDATE migrations SET version = NULL
+				WHERE id = $2 AND database_id = $3
+				RETURNING id
+			)
+			UPDATE executions
+			SET status = 'success', finished_at = now(), version_applied = $4,
+			    error_code = NULL, error_message = NULL
+			WHERE id = $1 AND EXISTS (SELECT 1 FROM chain)`
+	}
+	tag, err := r.db.Exec(ctx, sqlText, w.ExecutionID, w.MigrationID, w.DatabaseID, version)
 	if err != nil {
 		return fmt.Errorf("migration.MarkApplied: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("migration.MarkApplied: posisi rantai tidak dapat dicatat")
 	}
 	return nil
 }

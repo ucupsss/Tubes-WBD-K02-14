@@ -227,6 +227,23 @@ func (r *PgRepo) LockHead(ctx context.Context, db platformdb.DBTX, databaseID, i
 				WHERE r.rolls_back_execution_id = e.id AND r.status = 'success'))`, id).Scan(&h.ActiveSuccess); err != nil {
 		return Migration{}, head{}, fmt.Errorf("migration.LockHead active: %w", err)
 	}
+	var executedIrreversible bool
+	err = db.QueryRow(ctx, `
+		SELECT r.irreversible
+		FROM executions e
+		JOIN migration_revisions r ON r.id = e.revision_id
+		WHERE e.migration_id = $1 AND e.kind IN ('apply', 'forward') AND e.status = 'success'
+		  AND NOT EXISTS (
+			SELECT 1 FROM executions rb
+			WHERE rb.rolls_back_execution_id = e.id AND rb.status = 'success')
+		ORDER BY e.id DESC
+		LIMIT 1`, id).Scan(&executedIrreversible)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return Migration{}, head{}, fmt.Errorf("migration.LockHead irreversible: %w", err)
+	}
+	if err == nil {
+		h.Irreversible = executedIrreversible
+	}
 	return m, h, nil
 }
 
@@ -255,23 +272,23 @@ func (r *PgRepo) InsertExecution(ctx context.Context, db platformdb.DBTX, e Exec
 	return id, nil
 }
 
-func (r *PgRepo) ActiveSuccessID(ctx context.Context, db platformdb.DBTX, migrationID int64) (int64, error) {
-	var id int64
+func (r *PgRepo) ActiveSuccessID(ctx context.Context, db platformdb.DBTX, migrationID int64) (int64, int64, error) {
+	var id, revisionID int64
 	err := db.QueryRow(ctx, `
-		SELECT e.id FROM executions e
+		SELECT e.id, e.revision_id FROM executions e
 		WHERE e.migration_id = $1 AND e.kind IN ('apply', 'forward') AND e.status = 'success'
 		  AND NOT EXISTS (
 			SELECT 1 FROM executions r
 			WHERE r.rolls_back_execution_id = e.id AND r.status = 'success')
 		ORDER BY e.id DESC
-		LIMIT 1`, migrationID).Scan(&id)
+		LIMIT 1`, migrationID).Scan(&id, &revisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrNotActive
+		return 0, 0, ErrNotActive
 	}
 	if err != nil {
-		return 0, fmt.Errorf("migration.ActiveSuccessID: %w", err)
+		return 0, 0, fmt.Errorf("migration.ActiveSuccessID: %w", err)
 	}
-	return id, nil
+	return id, revisionID, nil
 }
 
 func (r *PgRepo) ListExecutions(ctx context.Context, db platformdb.DBTX, databaseID int64, hide bool, limit, offset int) ([]Execution, int, error) {
