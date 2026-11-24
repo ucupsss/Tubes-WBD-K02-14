@@ -1,4 +1,4 @@
-// Package worker mengambil job dari antrian dan mencatat hasilnya.
+// Package worker mengambil job dari antrian, memanggil Runner, lalu menutup atau mengantre ulang job.
 //
 // Percobaan SQL target dilakukan oleh Runner. Runner bawaan menolak eksekusi
 // sampai proses worker memasang executor migration.
@@ -61,6 +61,7 @@ type Halt struct {
 	Recorded      bool
 }
 
+// Error mengembalikan pesan Halt untuk dicatat di attempt.
 func (h *Halt) Error() string {
 	if h.Message != "" {
 		return h.Message
@@ -78,6 +79,7 @@ type Config struct {
 // Unavailable adalah runner sementara: job dicatat gagal tanpa menyentuh database target.
 type Unavailable struct{}
 
+// Run menolak eksekusi target tanpa membuka koneksi. SQLState 0A000 tidak di-retry.
 func (Unavailable) Run(context.Context, queue.Job) error {
 	return &queue.SQLError{SQLState: "0A000", Message: "Eksekusi target belum diaktifkan"}
 }

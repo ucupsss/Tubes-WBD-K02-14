@@ -22,6 +22,7 @@ type Handler struct {
 	approvals ApprovalLister
 }
 
+// NewHandler merakit handler JSON. az nil berarti pemeriksaan akses di handler dilewati (untuk tes).
 func NewHandler(svc *Service, az authz.Authorizer, approvals ApprovalLister) *Handler {
 	return &Handler{svc: svc, authz: az, approvals: approvals}
 }
@@ -46,6 +47,7 @@ func (b inputBody) input() Input {
 	}
 }
 
+// List menjawab GET /api/databases/{dbID}/migrations.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	dbID, ok := pathDB(w, r)
 	if !ok {
@@ -64,6 +66,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	writePage(w, items, page, size, total)
 }
 
+// Create menjawab POST /api/databases/{dbID}/migrations dengan 201.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	dbID, ok := pathDB(w, r)
 	if !ok {
@@ -83,6 +86,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, migrationJSON(m))
 }
 
+// Get menjawab GET /api/databases/{dbID}/migrations/{id}.
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	dbID, id, ok := pathIDs(w, r)
 	if !ok {
@@ -96,6 +100,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, migrationJSON(m))
 }
 
+// Update menjawab PUT /api/databases/{dbID}/migrations/{id}.
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	dbID, id, ok := pathIDs(w, r)
 	if !ok {
@@ -115,6 +120,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, migrationJSON(m))
 }
 
+// Delete menjawab DELETE /api/databases/{dbID}/migrations/{id} dengan 204.
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	dbID, id, ok := pathIDs(w, r)
 	if !ok {
@@ -127,6 +133,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	httpx.NoContent(w)
 }
 
+// Validate memeriksa sintaks SQL pada body tanpa menyimpannya.
 func (h *Handler) Validate(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := pathIDs(w, r); !ok {
 		return
@@ -143,14 +150,17 @@ func (h *Handler) Validate(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"valid": true})
 }
 
+// Submit membuka execution apply dan ronde approval.
 func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 	h.open(w, r, h.svc.Submit)
 }
 
+// Forward membuka execution forward untuk revisi yang sudah dibekukan.
 func (h *Handler) Forward(w http.ResponseWriter, r *http.Request) {
 	h.open(w, r, h.svc.Forward)
 }
 
+// Rollback membuka execution rollback untuk migration teratas yang masih aktif.
 func (h *Handler) Rollback(w http.ResponseWriter, r *http.Request) {
 	h.open(w, r, h.svc.Rollback)
 }
@@ -169,6 +179,7 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, fn func(ctx conte
 	httpx.WriteJSON(w, http.StatusCreated, executionJSON(e))
 }
 
+// ListExecutions menjawab GET /api/databases/{dbID}/executions. Query hide_rollback menyaring tampilan.
 func (h *Handler) ListExecutions(w http.ResponseWriter, r *http.Request) {
 	dbID, ok := pathDB(w, r)
 	if !ok {
@@ -188,6 +199,7 @@ func (h *Handler) ListExecutions(w http.ResponseWriter, r *http.Request) {
 	writePage(w, items, page, size, total)
 }
 
+// ShowExecution menjawab GET /api/executions/{execID} bila pemanggil boleh melihat databasenya.
 func (h *Handler) ShowExecution(w http.ResponseWriter, r *http.Request) {
 	id, err := httpx.PathInt64(r, "execID")
 	if err != nil {

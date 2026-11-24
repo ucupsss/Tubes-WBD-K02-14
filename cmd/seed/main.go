@@ -1,3 +1,4 @@
+// Program seed mengisi akun demo, koneksi target, grant, dan tabel big_events.
 package main
 
 import (
