@@ -3,63 +3,46 @@ package migration
 import (
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/clock"
-	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
-func TestHandler_Create_Validation(t *testing.T) {
-	h := NewHandler(NewService(nil, &fakeRepo{}, nil, clock.Real{}), view.New(), nil)
-	form := url.Values{}
-	form.Set("title", "")
-	form.Set("sql_text", "")
-	req := httptest.NewRequest(http.MethodPost, "/db/1/migrations", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetPathValue("dbID", "1")
-	rec := httptest.NewRecorder()
-
-	h.Create(rec, req)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422", rec.Code)
-	}
-}
-
-func TestHandler_Create_Success(t *testing.T) {
-	h := NewHandler(NewService(nil, &fakeRepo{created: 9}, nil, clock.Real{}), view.New(), nil)
-	form := url.Values{}
-	form.Set("title", "Buat tabel")
-	form.Set("sql_text", "CREATE TABLE t (id int)")
-	req := httptest.NewRequest(http.MethodPost, "/db/1/migrations", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+func TestHandler_Create_RejectsInvalidJSON(t *testing.T) {
+	h := NewHandler(NewService(nil, nil, nil), nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/databases/1/migrations", strings.NewReader(`{"title":"x","unknown":1}`))
 	req.SetPathValue("dbID", "1")
 	req = req.WithContext(authz.WithPrincipal(req.Context(), authz.Principal{UserID: 1, Username: "alice"}))
 	rec := httptest.NewRecorder()
-
 	h.Create(rec, req)
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want 303", rec.Code)
-	}
-	if loc := rec.Header().Get("Location"); loc != "/db/1/migrations/9" {
-		t.Fatalf("location = %q", loc)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestHandler_Execute_SuccessIsRejected(t *testing.T) {
-	repo := &fakeRepo{m: sample(StatusSuccess)}
-	h := NewHandler(NewService(nil, repo, nil, clock.NewFake(time.Now())), view.New(), nil)
-	req := httptest.NewRequest(http.MethodPost, "/db/1/migrations/1/execute", nil)
+func TestHandler_Create_RejectsEmptyTitle(t *testing.T) {
+	h := NewHandler(NewService(nil, nil, nil), nil, nil)
+	body := `{"title":" ","up_sql":"SELECT 1","down_sql":"SELECT 1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/databases/1/migrations", strings.NewReader(body))
 	req.SetPathValue("dbID", "1")
-	req.SetPathValue("id", "1")
 	req = req.WithContext(authz.WithPrincipal(req.Context(), authz.Principal{UserID: 1, Username: "alice"}))
 	rec := httptest.NewRecorder()
+	h.Create(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "title") {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
 
-	h.Execute(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409", rec.Code)
+func TestHandler_Validate_OK(t *testing.T) {
+	h := NewHandler(NewService(nil, nil, nil), nil, nil)
+	body := `{"title":"t","up_sql":"CREATE TABLE t (id int)","down_sql":"DROP TABLE t"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/databases/1/migrations/3/validate", strings.NewReader(body))
+	req.SetPathValue("dbID", "1")
+	req.SetPathValue("id", "3")
+	rec := httptest.NewRecorder()
+	h.Validate(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"valid":true`) {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }

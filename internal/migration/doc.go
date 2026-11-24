@@ -1,4 +1,4 @@
-// Package migration mengelola migration: editor, eksekusi transaksional, riwayat linear, splitter SQL.
+// Package migration mengelola definisi migration, revisi SQL, dan riwayat execution.
 //
 // Pemilik: C. Lihat pembagian.md & panduan-pengerjaan.md.
 package migration

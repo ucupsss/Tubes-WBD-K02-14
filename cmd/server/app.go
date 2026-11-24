@@ -82,13 +82,12 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 		httpx.HandleError(w, r, views, apperr.NotFound("Halaman tidak ditemukan"))
 	})
 
+	migRepo := migration.NewPgRepo()
+	approvalSvc := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), migRepo)
 	groupsSvc := groups.NewService(pool, groups.NewPgRepo(), bumper)
 	usersSvc := users.NewService(pool, users.NewPgRepo(), authSvc, sessMgr).WithLeaderGuard(groupsSvc)
 	databasesSvc := databases.NewService(pool, dbRepo, conns, cfg.SecretKey)
 	accessSvc := access.NewService(pool, access.NewPgRepo(), bumper)
-	// Selama modul execution milik C belum ada, approve/reject mengembalikan 409 executions_unavailable.
-	approvalSvc := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), approval.UnavailableExecutions{})
-
 	api.New(api.Deps{
 		Auth: authSvc, Sessions: sessMgr, Users: usersSvc, Groups: groupsSvc, Access: accessSvc,
 		Databases: databasesSvc, Approval: approvalSvc, Authz: az, Logger: logger,
@@ -96,8 +95,8 @@ func newApp(cfg config.Config, pool *pgxpool.Pool, webFS fs.FS, logger *slog.Log
 
 	auth.RegisterRoutes(mux, auth.NewHandler(authSvc, sessMgr, views, logger), mw)
 	explorer.RegisterRoutes(mux, explorer.NewHandler(explorer.NewService(conns, az, explorer.NewPgRepo(), getter), views), mw)
-	migSvc := migration.NewService(pool, migration.NewPgRepo(), conns, clk)
-	migration.RegisterRoutes(mux, migration.NewHandler(migSvc, views, az), mw)
+	migSvc := migration.NewService(pool, migRepo, approvalSvc)
+	migration.RegisterRoutes(mux, migration.NewHandler(migSvc, az, approvalSvc), mw)
 	explain.RegisterRoutes(mux, explain.NewHandler(migSvc, explain.NewAnalyzer(conns), views), mw)
 
 	handler := httpx.Chain(mux,

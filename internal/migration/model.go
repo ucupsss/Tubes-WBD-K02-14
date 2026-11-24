@@ -1,123 +1,140 @@
 package migration
 
 import (
-	"strconv"
 	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 )
 
-// Status is the lifecycle of one migration row.
-type Status string
-
+// Jenis execution (D25). Resume bukan jenis baru.
 const (
-	StatusDraft   Status = "draft"
-	StatusRunning Status = "running"
-	StatusSuccess Status = "success"
-	StatusFailed  Status = "failed"
+	KindApply    = "apply"
+	KindForward  = "forward"
+	KindRollback = "rollback"
 )
 
-// Migration is one row in the platform history for a target database.
-type Migration struct {
-	ID                 int64
-	DatabaseID         int64
-	Version            *int32
-	Title              string
-	SQLText            string
-	Status             Status
-	CreatedBy          int64
-	CreatedByUsername  string
-	CreatedAt          time.Time
-	UpdatedBy          *int64
-	UpdatedAt          time.Time
-	ExecutedBy         *int64
-	ExecutedByUsername string
-	ExecutedAt         *time.Time
-	FinishedAt         *time.Time
-	DurationMS         *int32
-	ErrorMessage       *string
-}
+// Status execution (D26). "Draft" bukan status execution: migration yang belum punya execution.
+const (
+	StatusPendingReview     = "pending_review"
+	StatusApproved          = "approved"
+	StatusQueued            = "queued"
+	StatusRunning           = "running"
+	StatusSuccess           = "success"
+	StatusFailed            = "failed"
+	StatusPartial           = "partial"
+	StatusPartiallyReverted = "partially_reverted"
+	StatusUncertain         = "uncertain"
+	StatusRejected          = "rejected"
+	StatusCancelled         = "cancelled"
+)
 
-// Run is one execution attempt.
-type Run struct {
+const (
+	ModeNormal = "normal"
+	ModeBatch  = "batch"
+)
+
+// Revision adalah satu versi SQL. Setelah frozen_at terisi, isi SQL tidak boleh diubah.
+type Revision struct {
 	ID                 int64
 	MigrationID        int64
-	ExecutedBy         int64
-	ExecutedByUsername string
-	SQLSnapshot        string
-	Status             Status
-	ErrorMessage       *string
-	StartedAt          time.Time
-	FinishedAt         time.Time
+	RevisionNo         int
+	UpSQL              string
+	DownSQL            *string
+	Irreversible       bool
+	IrreversibleReason *string
+	ExecMode           string
+	BatchTable         *string
+	BatchColumn        *string
+	BatchSize          *int
+	SQLHash            string
+	FrozenAt           *time.Time
+	CreatedBy          int64
+	CreatedAt          time.Time
+}
+
+// Migration adalah identitas satu perubahan pada satu database target.
+type Migration struct {
+	ID                int64
+	DatabaseID        int64
+	Version           *int32
+	Title             string
+	CurrentRevisionID int64
+	CreatedBy         int64
+	CreatedByUsername string
+	CreatedAt         time.Time
+	Revision          Revision
+}
+
+// Execution adalah satu permintaan untuk menjalankan atau membatalkan sebuah revisi.
+type Execution struct {
+	ID                   int64
+	DatabaseID           int64
+	MigrationID          int64
+	MigrationTitle       string
+	RevisionID           int64
+	Kind                 string
+	Status               string
+	RequestedBy          int64
+	RequestedByUsername  string
+	RollsBackExecutionID *int64
+	ApprovalRound        int
+	VersionApplied       *int32
+	BatchesCommitted     int
+	RowsCommitted        int64
+	CreatedAt            time.Time
+	StartedAt            *time.Time
+	FinishedAt           *time.Time
+	ErrorCode            *string
+	ErrorMessage         *string
+}
+
+// Attempt adalah satu percobaan teknis atas sebuah execution, termasuk retry otomatis.
+type Attempt struct {
+	ID           int64
+	ExecutionID  int64
+	AttemptNo    int
+	WorkerID     *string
+	Status       string
+	SQLExecuted  string
+	SQLState     *string
+	ErrorMessage *string
+	StartedAt    time.Time
+	FinishedAt   *time.Time
+	TraceID      *string
+}
+
+// Page adalah daftar berhalaman.
+type Page struct {
+	Items    any
+	Page     int
+	PageSize int
+	Total    int
 }
 
 var (
-	ErrNotFound      = apperr.NotFound("Migration tidak ditemukan")
-	ErrImmutable     = apperr.Conflict("Migration yang sudah sukses tidak dapat diubah")
-	ErrNotExecutable = apperr.Conflict("Migration ini tidak dapat dijalankan")
-	ErrNotDeletable  = apperr.Conflict("Hanya draft yang dapat dihapus")
-	ErrRejectedSQL   = apperr.Invalid("SQL ditolak: perintah transaction control, VACUUM, CREATE DATABASE, atau CREATE INDEX CONCURRENTLY tidak diizinkan")
+	ErrNotFound       = apperr.NotFound("Migration tidak ditemukan")
+	ErrExecNotFound   = apperr.NotFound("Eksekusi tidak ditemukan")
+	ErrImmutable      = apperr.Conflict("Revisi yang sudah diajukan tidak dapat diubah").WithReason("immutable")
+	ErrNotDeletable   = apperr.Conflict("Hanya draft yang belum pernah diajukan yang dapat dihapus").WithReason("not_draft")
+	ErrNotTop         = apperr.Conflict("Hanya migration teratas pada rantai aktif yang dapat di-rollback").WithReason("not_top_of_chain")
+	ErrIrreversible   = apperr.Conflict("Migration ini ditandai tidak dapat di-rollback").WithReason("irreversible")
+	ErrNotActive      = apperr.Conflict("Migration ini tidak sedang aktif").WithReason("not_active")
+	ErrAlreadyActive  = apperr.Conflict("Migration ini masih aktif di rantai").WithReason("already_active")
+	ErrNotForwardable = apperr.Conflict("Migration ini tidak dapat di-forward").WithReason("not_forwardable")
+	ErrNotSubmittable = apperr.Conflict("Migration ini tidak dapat diajukan. Ubah SQL untuk membuat revisi baru, atau gunakan forward.").WithReason("not_submittable")
+	ErrBlocked        = apperr.Conflict("Masih ada eksekusi yang belum selesai untuk migration ini").WithReason("blocked")
+	ErrNotAnalyzable  = apperr.Conflict("Hanya revisi yang belum diajukan yang dapat dianalisis").WithReason("not_analyzable")
+	ErrRejectedSQL    = apperr.Invalid("SQL ditolak: perintah transaction control, VACUUM, CREATE DATABASE, atau CREATE INDEX CONCURRENTLY tidak diizinkan")
 )
 
-// VersionLabel is the applied version, or an em dash while the migration has none.
-func (m Migration) VersionLabel() string {
-	if m.Version == nil {
-		return "—"
-	}
-	return strconv.FormatInt(int64(*m.Version), 10)
-}
-
-// ErrorText is the stored error, or empty.
-func (m Migration) ErrorText() string {
-	if m.ErrorMessage == nil {
-		return ""
-	}
-	return *m.ErrorMessage
-}
-
-// ErrorText is the stored run error, or empty.
-func (r Run) ErrorText() string {
-	if r.ErrorMessage == nil {
-		return ""
-	}
-	return *r.ErrorMessage
-}
-
-// Duration is how long the attempt took.
-func (r Run) Duration() time.Duration {
-	return r.FinishedAt.Sub(r.StartedAt)
-}
-
-// WhenLabel prefers the execution time and falls back to creation time.
-func (m Migration) WhenLabel() time.Time {
-	if m.ExecutedAt != nil {
-		return *m.ExecutedAt
-	}
-	return m.CreatedAt
-}
-
-func checkEditable(status Status) error {
-	if status == StatusDraft || status == StatusFailed {
-		return nil
-	}
-	return ErrImmutable
-}
-
-func checkDeletable(status Status) error {
-	if status != StatusDraft {
-		return ErrNotDeletable
-	}
-	return nil
-}
-
-func checkExecutable(status Status) error {
-	if status == StatusDraft || status == StatusFailed {
-		return nil
-	}
-	return ErrNotExecutable
-}
-
-// NextVersion is the next linear version after the highest applied version (0 when none).
+// NextVersion adalah posisi berikutnya pada rantai aktif.
 func NextVersion(currentMax int32) int32 {
 	return currentMax + 1
+}
+
+func openStatuses() []string {
+	return []string{
+		StatusPendingReview, StatusApproved, StatusQueued, StatusRunning,
+		StatusPartial, StatusPartiallyReverted, StatusUncertain,
+	}
 }
