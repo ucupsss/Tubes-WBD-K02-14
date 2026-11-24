@@ -1,4 +1,4 @@
-.PHONY: up down db-reset run worker seed dataset fmt lint test test-integration check cover web-install web-dev web-build web-lint web-test web-check
+.PHONY: up down db-reset run worker seed dataset k6 fmt lint test test-integration check cover web-install web-dev web-build web-lint web-test web-check
 
 up:
 	docker compose up -d
@@ -20,6 +20,9 @@ seed:
 
 dataset:
 	go run ./cmd/dataset
+
+k6:
+	k6 run load/k6/api.js
 
 fmt:
 	gofmt -w .
