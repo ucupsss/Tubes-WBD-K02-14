@@ -3,8 +3,6 @@
 // Kolom id unik dan tidak berubah, sehingga mode batch dapat memotong rentang
 // dengan placeholder :from dan :to. Jumlah baris Rows dipilih supaya satu
 // UPDATE seluruh tabel tanpa batch memakan waktu lebih dari satu detik.
-//
-// Pemilik: C.
 package dataset
 
 import (

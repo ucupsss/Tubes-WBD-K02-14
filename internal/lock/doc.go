@@ -2,6 +2,4 @@
 //
 // Satu database hanya punya satu execution berjalan. Lease diperpanjang heartbeat
 // dan boleh diambil alih setelah kedaluwarsa, setelah bukti di target diperiksa.
-//
-// Pemilik: C.
 package lock

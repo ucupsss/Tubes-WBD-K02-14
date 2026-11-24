@@ -2,6 +2,4 @@
 //
 // API memasukkan baris ke migration_jobs dan langsung mengembalikan job ID.
 // Worker lain mengambil baris itu dengan FOR UPDATE SKIP LOCKED.
-//
-// Pemilik: C.
 package queue

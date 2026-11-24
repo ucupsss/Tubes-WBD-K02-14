@@ -2,8 +2,6 @@
 //
 // Percobaan SQL target dilakukan oleh Runner. Runner bawaan menolak eksekusi
 // sampai proses worker memasang executor migration.
-//
-// Pemilik: C.
 package worker
 
 import (
