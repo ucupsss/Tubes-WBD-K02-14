@@ -11,9 +11,17 @@ import (
 )
 
 // PgRepo menyimpan migration, revisi, dan execution di database platform.
-type PgRepo struct{}
+// db dipakai method yang dipanggil worker di luar transaksi pemanggil. Method lain menerima DBTX sendiri.
+type PgRepo struct {
+	db platformdb.DBTX
+}
 
 func NewPgRepo() *PgRepo { return &PgRepo{} }
+
+// Bind mengembalikan repo yang memakai koneksi ini untuk panggilan worker.
+func (r *PgRepo) Bind(db platformdb.DBTX) *PgRepo {
+	return &PgRepo{db: db}
+}
 
 const revisionCols = `
 	r.id, r.migration_id, r.revision_no, r.up_sql, r.down_sql, r.irreversible, r.irreversible_reason,

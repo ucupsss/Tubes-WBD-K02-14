@@ -18,6 +18,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
@@ -41,7 +42,7 @@ func NewServer(t *testing.T, pool *pgxpool.Pool) *Server {
 	az := authz.NewAuthorizer(dbconn.NewGrantRepo(pool))
 	repo := migration.NewPgRepo()
 	approvalSvc := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), repo)
-	svc := migration.NewService(pool, repo, approvalSvc)
+	svc := migration.NewService(pool, repo, approvalSvc).WithQueue(queue.New(pool))
 	views := view.New()
 	h := migration.NewHandler(svc, az, approvalSvc)
 	mux := http.NewServeMux()

@@ -25,4 +25,8 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler, mw AuthorizerMiddleware) {
 	mux.Handle("POST /api/databases/{dbID}/migrations/{id}/rollback", mw.Protect(authz.ActMigrationRollback, h.Rollback))
 	mux.Handle("GET /api/databases/{dbID}/executions", mw.Protect(authz.ActMigrationView, h.ListExecutions))
 	mux.Handle("GET /api/executions/{execID}", mw.RequireLogin(http.HandlerFunc(h.ShowExecution)))
+	mux.Handle("POST /api/executions/{execID}/enqueue", mw.RequireLogin(http.HandlerFunc(h.Enqueue)))
+	mux.Handle("POST /api/executions/{execID}/resume", mw.RequireLogin(http.HandlerFunc(h.Resume)))
+	mux.Handle("POST /api/executions/{execID}/cancel", mw.RequireLogin(http.HandlerFunc(h.Cancel)))
+	mux.Handle("GET /api/jobs/{jobID}", mw.RequireLogin(http.HandlerFunc(h.ShowJob)))
 }

@@ -125,6 +125,11 @@ var (
 	ErrBlocked        = apperr.Conflict("Masih ada eksekusi yang belum selesai untuk migration ini").WithReason("blocked")
 	ErrNotAnalyzable  = apperr.Conflict("Hanya revisi yang belum diajukan yang dapat dianalisis").WithReason("not_analyzable")
 	ErrRejectedSQL    = apperr.Invalid("SQL ditolak: perintah transaction control, VACUUM, CREATE DATABASE, atau CREATE INDEX CONCURRENTLY tidak diizinkan")
+	ErrNotApproved    = apperr.Conflict("Eksekusi belum disetujui").WithReason("not_approved")
+	ErrNotResumable   = apperr.Conflict("Hanya eksekusi yang berhenti di tengah yang dapat dilanjutkan").WithReason("not_resumable")
+	ErrNotCancellable = apperr.Conflict("Eksekusi ini tidak dapat dibatalkan").WithReason("not_cancellable")
+	ErrJobRunning     = apperr.Conflict("Eksekusi sedang berjalan").WithReason("job_running")
+	ErrJobNotFound    = apperr.NotFound("Job tidak ditemukan")
 )
 
 // NextVersion adalah posisi berikutnya pada rantai aktif.
