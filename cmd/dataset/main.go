@@ -1,3 +1,4 @@
+// Program dataset mengisi big_events. Flag -search mencari jumlah baris sampai satu UPDATE penuh melebihi satu detik.
 package main
 
 import (

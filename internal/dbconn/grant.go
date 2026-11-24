@@ -14,6 +14,7 @@ type GrantRepo struct {
 	db platformdb.DBTX
 }
 
+// NewGrantRepo membuat pembaca grant untuk authz.Authorizer.
 func NewGrantRepo(db platformdb.DBTX) *GrantRepo {
 	return &GrantRepo{db: db}
 }

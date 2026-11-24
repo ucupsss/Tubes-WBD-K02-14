@@ -10,10 +10,12 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 )
 
+// Enqueue menjawab POST /api/executions/{execID}/enqueue dengan 202 dan job_id.
 func (h *Handler) Enqueue(w http.ResponseWriter, r *http.Request) {
 	h.publish(w, r, false)
 }
 
+// Resume menjawab POST /api/executions/{execID}/resume tanpa membuka ronde approval baru.
 func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
 	h.publish(w, r, true)
 }
@@ -41,6 +43,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request, resume bool) {
 	})
 }
 
+// Cancel menjawab POST /api/executions/{execID}/cancel sebelum worker mengambil job.
 func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 	execID, ok := h.executionID(w, r)
 	if !ok {
@@ -57,6 +60,7 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"execution_id": execID, "status": StatusCancelled})
 }
 
+// ShowJob menjawab GET /api/jobs/{jobID} untuk polling status antrian.
 func (h *Handler) ShowJob(w http.ResponseWriter, r *http.Request) {
 	jobID, err := httpx.PathInt64(r, "jobID")
 	if err != nil {

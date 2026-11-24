@@ -56,6 +56,7 @@ type Executor struct {
 	proof func(ctx context.Context, pool *pgxpool.Pool, execID int64) (bool, error)
 }
 
+// NewExecutor merakit pelaksana SQL target. check dan az boleh nil di tes yang tidak memeriksa approval atau akses.
 func NewExecutor(pool *pgxpool.Pool, repo *PgRepo, conns dbconn.Manager, locks *lock.PgLocker, check Checker, az authz.Authorizer) *Executor {
 	if repo != nil && repo.db == nil {
 		repo = repo.Bind(pool)
