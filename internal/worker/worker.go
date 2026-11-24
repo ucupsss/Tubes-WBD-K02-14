@@ -35,7 +35,37 @@ type Executions interface {
 	MarkQueued(ctx context.Context, execID int64) error
 	MarkFailed(ctx context.Context, execID int64, message string) error
 	MarkSucceeded(ctx context.Context, execID int64) error
-	InsertAttempt(ctx context.Context, execID int64, attemptNo int, workerID, status, sqlstate, message string) error
+	InsertAttempt(ctx context.Context, execID int64, attemptNo int, workerID, status, sqlstate, message, sqlText string) error
+	MarkUncertain(ctx context.Context, execID int64, message string) error
+}
+
+const (
+	// DispositionSuccess menutup job sebagai selesai. Status execution sudah ditulis pemanggil.
+	DispositionSuccess = "success"
+	// DispositionDone menutup job tanpa menandai execution gagal (misalnya kembali ke review).
+	DispositionDone = "done"
+	// DispositionDead menandai execution gagal dan job dead.
+	DispositionDead = "dead"
+	// DispositionUncertain menyimpan status uncertain, menahan kunci, dan mengantre ulang.
+	DispositionUncertain = "uncertain"
+	// DispositionRetry mengembalikan job ke antrian tanpa menghabiskan jatah attempt.
+	DispositionRetry = "retry"
+)
+
+// Halt adalah hasil terstruktur dari runner eksekusi.
+type Halt struct {
+	Disposition   string
+	AttemptStatus string
+	Message       string
+	SQLState      string
+	Recorded      bool
+}
+
+func (h *Halt) Error() string {
+	if h.Message != "" {
+		return h.Message
+	}
+	return h.Disposition
 }
 
 // Config mengatur loop pengambilan job.
@@ -105,19 +135,25 @@ func Process(ctx context.Context, jobs Jobs, exec Executions, runner Runner, wor
 	if err != nil {
 		return err
 	}
-	if status == "cancelled" {
+	switch status {
+	case "cancelled", "success", "failed", "rejected", "pending_review", "approved":
 		return jobs.Complete(ctx, job.ID, queue.StatusDone)
-	}
-	ok, err := exec.MarkRunning(ctx, job.ExecutionID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return jobs.Complete(ctx, job.ID, queue.StatusDone)
+	case "queued":
+		ok, err := exec.MarkRunning(ctx, job.ExecutionID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return jobs.Complete(ctx, job.ID, queue.StatusDone)
+		}
 	}
 	slog.InfoContext(ctx, "job.claimed", "job_id", job.ID, "execution_id", job.ExecutionID, "attempt", job.Attempts, "worker_id", workerID)
 
 	runErr := runner.Run(ctx, job)
+	var halt *Halt
+	if errors.As(runErr, &halt) {
+		return finishHalt(ctx, jobs, exec, workerID, job, halt)
+	}
 	sqlstate, message := "", ""
 	var sqlErr *queue.SQLError
 	if errors.As(runErr, &sqlErr) {
@@ -130,7 +166,7 @@ func Process(ctx context.Context, jobs Jobs, exec Executions, runner Runner, wor
 	if runErr != nil {
 		attemptStatus = "failed"
 	}
-	if err := exec.InsertAttempt(ctx, job.ExecutionID, job.Attempts, workerID, attemptStatus, sqlstate, message); err != nil {
+	if err := exec.InsertAttempt(ctx, job.ExecutionID, job.Attempts, workerID, attemptStatus, sqlstate, message, ""); err != nil {
 		return err
 	}
 	if runErr == nil {
@@ -156,4 +192,40 @@ func Process(ctx context.Context, jobs Jobs, exec Executions, runner Runner, wor
 	}
 	slog.InfoContext(ctx, "job.dead", "job_id", job.ID, "execution_id", job.ExecutionID, "sqlstate", sqlstate)
 	return jobs.Complete(ctx, job.ID, queue.StatusDead)
+}
+
+func finishHalt(ctx context.Context, jobs Jobs, exec Executions, workerID string, job queue.Job, halt *Halt) error {
+	if !halt.Recorded && halt.AttemptStatus != "" {
+		if err := exec.InsertAttempt(ctx, job.ExecutionID, job.Attempts, workerID, halt.AttemptStatus, halt.SQLState, halt.Message, ""); err != nil {
+			return err
+		}
+	}
+	switch halt.Disposition {
+	case DispositionSuccess, DispositionDone:
+		return jobs.Complete(ctx, job.ID, queue.StatusDone)
+	case DispositionUncertain:
+		if !halt.Recorded {
+			if err := exec.MarkUncertain(ctx, job.ExecutionID, halt.Message); err != nil {
+				return err
+			}
+		}
+		return jobs.Requeue(ctx, job.ID, 15*time.Second)
+	case DispositionRetry:
+		if err := exec.MarkQueued(ctx, job.ExecutionID); err != nil {
+			return err
+		}
+		if restorer, ok := jobs.(interface {
+			RestoreAttempt(context.Context, int64) error
+		}); ok {
+			_ = restorer.RestoreAttempt(ctx, job.ID)
+		}
+		return jobs.Requeue(ctx, job.ID, 5*time.Second)
+	default:
+		if !halt.Recorded {
+			if err := exec.MarkFailed(ctx, job.ExecutionID, halt.Message); err != nil {
+				return err
+			}
+		}
+		return jobs.Complete(ctx, job.ID, queue.StatusDead)
+	}
 }

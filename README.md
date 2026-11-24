@@ -185,9 +185,13 @@ Satu migration punya revisi SQL. Mengajukan revisi membuat execution `pending_re
 
 Setelah execution berstatus `approved`, `POST /api/executions/{id}/enqueue` menulis satu baris `migration_jobs` dan menjawab **202** dengan `job_id`. Publish kedua untuk execution yang sama tidak membuat job baru. `POST …/resume` melanjutkan execution `partial` atau `partially_reverted` tanpa approval baru. `POST …/cancel` hanya berlaku sebelum worker mengambil job.
 
-`make worker` menjalankan proses terpisah. Worker mengambil job dengan `FOR UPDATE SKIP LOCKED`. Kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`) dicoba lagi paling banyak 3 kali, dengan jeda 5 detik lalu 15 detik. Kesalahan SQL lain langsung membuat job `dead`. Job tetap ada di database setelah proses worker berhenti. Status untuk polling ada di `GET /api/jobs/{id}`.
+`make worker` menjalankan proses terpisah. Worker mengambil job dengan `FOR UPDATE SKIP LOCKED`, termasuk job `running` yang `claimed_at`-nya lebih lama dari 30 detik (worker pemegangnya mati). Satu database hanya dikunci satu execution. Lease 30 detik diperpanjang tiap 10 detik. Database lain boleh jalan bersamaan.
 
-Runner yang benar-benar menjalankan SQL target belum dipasang. Sampai itu ada, worker mencatat attempt gagal dengan pesan bahwa eksekusi target belum diaktifkan, tanpa membuka koneksi ke database target.
+Sebelum SQL dijalankan, worker memeriksa lagi: status masih menunggu, hash SQL sama dengan yang disetujui, approval lengkap untuk grant saat ini, peminta masih punya akses edit, dan aturan rantai masih berlaku. Approval yang tidak lengkap mengembalikan execution ke `pending_review` tanpa menjalankan SQL. Alasan lain menandai execution `failed`.
+
+Mode normal menjalankan SQL up atau down di satu transaction target bersama bukti `_dbmp.executions` dan `_dbmp.applied_migrations`. Commit platform hanya dilakukan setelah commit target. Bila hasil commit tidak dapat dipastikan, status menjadi `uncertain`, kunci tetap dipegang, dan job diperiksa lagi nanti: ada bukti berarti sudah commit, tidak ada bukti dan koneksi sehat berarti aman diulang, koneksi mati tetap `uncertain`.
+
+Kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`) dicoba lagi paling banyak 3 kali, dengan jeda 5 detik lalu 15 detik. Kesalahan SQL lain membuat job `dead`. Mode batch belum dijalankan di sini. Status untuk polling ada di `GET /api/jobs/{id}`.
 
 ## Analisis EXPLAIN
 

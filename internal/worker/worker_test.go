@@ -115,7 +115,11 @@ func (f *fakeExec) MarkSucceeded(context.Context, int64) error {
 	f.final = "success"
 	return nil
 }
-func (f *fakeExec) InsertAttempt(_ context.Context, _ int64, attemptNo int, _, _, _, _ string) error {
+func (f *fakeExec) InsertAttempt(_ context.Context, _ int64, attemptNo int, _, _, _, _, _ string) error {
 	f.attempts = append(f.attempts, attemptNo)
+	return nil
+}
+func (f *fakeExec) MarkUncertain(context.Context, int64, string) error {
+	f.final = "uncertain"
 	return nil
 }
