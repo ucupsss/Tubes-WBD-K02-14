@@ -35,17 +35,22 @@ func (q *PgQueue) Enqueue(ctx context.Context, db platformdb.DBTX, execID, dbID 
 	}
 	var id int64
 	err = db.QueryRow(ctx, `
-		INSERT INTO migration_jobs (execution_id, database_id, status, trace_context)
-		VALUES ($1, $2, 'queued', $3::jsonb)
+		INSERT INTO migration_jobs (execution_id, database_id, status, trace_context, attempts)
+		VALUES (
+			$1, $2, 'queued', $3::jsonb,
+			COALESCE((SELECT MAX(attempt_no) FROM execution_attempts WHERE execution_id = $1), 0))
 		ON CONFLICT (execution_id) DO UPDATE
 		SET status = 'queued',
 		    database_id = EXCLUDED.database_id,
-		    run_after = now(),
+		    run_after = CASE WHEN migration_jobs.status = 'queued' THEN migration_jobs.run_after ELSE now() END,
 		    claimed_by = NULL,
 		    claimed_at = NULL,
 		    trace_context = EXCLUDED.trace_context,
-		    enqueued_at = now(),
-		    attempts = 0
+		    enqueued_at = CASE WHEN migration_jobs.status = 'queued' THEN migration_jobs.enqueued_at ELSE now() END,
+		    attempts = CASE
+		        WHEN migration_jobs.status = 'queued' THEN migration_jobs.attempts
+		        ELSE COALESCE((SELECT MAX(attempt_no) FROM execution_attempts WHERE execution_id = migration_jobs.execution_id), 0)
+		    END
 		WHERE migration_jobs.status <> 'running'
 		RETURNING id`, execID, dbID, string(raw)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
