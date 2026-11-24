@@ -1,4 +1,4 @@
-.PHONY: up down db-reset run worker seed fmt lint test test-integration check cover web-install web-dev web-build web-lint web-test web-check
+.PHONY: up down db-reset run worker seed dataset fmt lint test test-integration check cover web-install web-dev web-build web-lint web-test web-check
 
 up:
 	docker compose up -d
@@ -17,6 +17,9 @@ worker:
 
 seed:
 	go run ./cmd/seed
+
+dataset:
+	go run ./cmd/dataset
 
 fmt:
 	gofmt -w .

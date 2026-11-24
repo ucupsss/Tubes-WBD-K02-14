@@ -12,6 +12,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/config"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dataset"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 )
 
@@ -66,11 +67,34 @@ func main() {
 		Grants: map[int64]string{db1: "view", db2: "view"},
 	}))
 
+	if err := loadBigEvents(ctx, logger); err != nil {
+		logger.Error("dataset", "err", err)
+		os.Exit(1)
+	}
+
 	logger.Info("seed complete",
 		"alice", alice, "bob", bob, "carol", carol,
 		"dev", dev, "analyst", analyst,
 		"target_db_1", db1, "target_db_2", db2,
+		"big_events", dataset.Rows,
 	)
+}
+
+func loadBigEvents(ctx context.Context, logger *slog.Logger) error {
+	url := os.Getenv("DATASET_DATABASE_URL")
+	if url == "" {
+		url = "postgres://target:target@localhost:5433/target1?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := dataset.Ensure(ctx, pool, dataset.Rows); err != nil {
+		return err
+	}
+	logger.Info("big_events siap", "rows", dataset.Rows)
+	return nil
 }
 
 func ensureUser(ctx context.Context, pool *pgxpool.Pool, username, password string) int64 {

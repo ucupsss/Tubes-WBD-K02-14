@@ -193,6 +193,17 @@ Mode normal menjalankan SQL up atau down di satu transaction target bersama bukt
 
 Kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`) dicoba lagi paling banyak 3 kali, dengan jeda 5 detik lalu 15 detik. Kesalahan SQL lain membuat job `dead`. Mode batch belum dijalankan di sini. Status untuk polling ada di `GET /api/jobs/{id}`.
 
+## Dataset besar
+
+`make seed` dan `make dataset` mengisi tabel `big_events` (`id` bigint primary key, `payload` int) di target-db-1. `id` unik dan tidak berubah, jadi mode batch dapat memakai `WHERE id > :from AND id <= :to`. Jumlah baris tetap 400.000. Ulangi pencarian dengan `go run ./cmd/dataset -search`.
+
+Pengukuran pada AMD Ryzen 7 7435HS (8 core / 16 thread), RAM 15,7 GB, Postgres 16 di Docker:
+
+| Cara | Hasil |
+|------|--------|
+| Satu `UPDATE big_events SET payload = payload + 1` tanpa batch | 1,311 detik |
+| Update yang sama, 8 batch × 50.000 baris | 1,533 detik |
+
 ## Analisis EXPLAIN
 
 Tombol **Analisis** di halaman detail migration (draft atau gagal) menjalankan `EXPLAIN` terhadap SQL migration sebelum dieksekusi. Centang "Dengan ANALYZE" untuk `EXPLAIN ANALYZE`.
