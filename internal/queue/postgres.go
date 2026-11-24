@@ -14,10 +14,13 @@ import (
 
 // PgQueue menyimpan job di tabel migration_jobs.
 type PgQueue struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	stale time.Duration
 }
 
-func New(pool *pgxpool.Pool) *PgQueue { return &PgQueue{pool: pool} }
+func New(pool *pgxpool.Pool) *PgQueue {
+	return &PgQueue{pool: pool, stale: 30 * time.Second}
+}
 
 // Enqueue membuat job atau mengembalikan baris yang sama ke status queued.
 // execution_id unik, jadi publish ganda tidak membuat job kedua.
@@ -58,16 +61,23 @@ func (q *PgQueue) Claim(ctx context.Context, workerID string) (*Job, error) {
 	var job *Job
 	err := platformdb.WithTx(ctx, q.pool, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
-			UPDATE migration_jobs j
-			SET status = 'running', claimed_by = $1, claimed_at = now(), attempts = j.attempts + 1
-			WHERE j.id = (
-				SELECT id FROM migration_jobs
-				WHERE status = 'queued' AND run_after <= now()
+			WITH picked AS (
+				SELECT id, status FROM migration_jobs
+				WHERE (status = 'queued' AND run_after <= now())
+				   OR (status = 'running' AND claimed_at <= now() - make_interval(secs => $2))
 				ORDER BY id
 				FOR UPDATE SKIP LOCKED
-				LIMIT 1)
-			RETURNING id, execution_id, database_id, status, attempts, claimed_by,
-			          enqueued_at, claimed_at, run_after, trace_context`, workerID)
+				LIMIT 1
+			)
+			UPDATE migration_jobs j
+			SET status = 'running',
+			    claimed_by = $1,
+			    claimed_at = now(),
+			    attempts = CASE WHEN picked.status = 'queued' THEN j.attempts + 1 ELSE j.attempts END
+			FROM picked
+			WHERE j.id = picked.id
+			RETURNING j.id, j.execution_id, j.database_id, j.status, j.attempts, j.claimed_by,
+			          j.enqueued_at, j.claimed_at, j.run_after, j.trace_context`, workerID, q.stale.Seconds())
 		got, err := scanJob(row)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -98,6 +108,15 @@ func (q *PgQueue) Complete(ctx context.Context, jobID int64, status string) erro
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// RestoreAttempt mengurangi hitungan attempt yang terpakai hanya karena kunci sedang sibuk.
+func (q *PgQueue) RestoreAttempt(ctx context.Context, jobID int64) error {
+	_, err := q.pool.Exec(ctx, `UPDATE migration_jobs SET attempts = GREATEST(attempts - 1, 0) WHERE id = $1`, jobID)
+	if err != nil {
+		return fmt.Errorf("queue.RestoreAttempt: %w", err)
 	}
 	return nil
 }

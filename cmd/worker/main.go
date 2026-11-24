@@ -9,7 +9,12 @@ import (
 	"syscall"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/db"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/admin/databases"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/approval"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/config"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/lock"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
@@ -43,8 +48,13 @@ func main() {
 			workerID = "worker"
 		}
 	}
+	repo := migration.NewPgRepo().Bind(pool)
+	conns := dbconn.NewManager(connGetter{db: pool, repo: databases.NewPgRepo()}, cfg.SecretKey)
+	defer conns.CloseAll()
+	approvals := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), repo)
+	runner := migration.NewExecutor(pool, repo, conns, lock.New(pool), migration.WrapApproval(approvals), authz.NewAuthorizer(dbconn.NewGrantRepo(pool)))
 	logger.Info("worker started", "worker_id", workerID, "concurrency", cfg.WorkerConcurrency)
-	err = worker.Run(ctx, queue.New(pool), migration.NewPgRepo().Bind(pool), worker.Unavailable{}, worker.Config{
+	err = worker.Run(ctx, queue.New(pool), repo, runner, worker.Config{
 		WorkerID:    workerID,
 		Concurrency: cfg.WorkerConcurrency,
 		Poll:        cfg.WorkerPollInterval,
