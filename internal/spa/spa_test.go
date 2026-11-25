@@ -104,9 +104,9 @@ func TestServe_SecurityHeaders(t *testing.T) {
 
 func TestNew_NotBuilt(t *testing.T) {
 	for name, fsys := range map[string]fstest.MapFS{
-		"tanpa dist":          {"templates/x.html": {Data: []byte("x")}},
-		"dist tanpa index":    {"dist/.gitkeep": {Data: nil}},
-		"dist dengan assets":  {"dist/assets/a.js": {Data: []byte("x")}},
+		"tanpa dist":         {"templates/x.html": {Data: []byte("x")}},
+		"dist tanpa index":   {"dist/.gitkeep": {Data: nil}},
+		"dist dengan assets": {"dist/assets/a.js": {Data: []byte("x")}},
 	} {
 		h := spa.New(fsys)
 		if h.Available() {
