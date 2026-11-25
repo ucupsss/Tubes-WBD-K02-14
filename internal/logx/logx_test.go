@@ -212,3 +212,17 @@ func TestAudit_WritesEvent(t *testing.T) {
 		t.Fatalf("event = %v", m)
 	}
 }
+
+func TestRedactString_KeyValueSecrets(t *testing.T) {
+	cases := map[string]string{
+		"host=db user=app password=hunter2 dbname=x": "host=db user=app password=[REDACTED] dbname=x",
+		"gagal: PASSWORD = 'rahasia sekali'":         "gagal: PASSWORD = [REDACTED]",
+		"token: abc123, lanjut":                      "token: [REDACTED], lanjut",
+		"kolom password_hash tidak ada":              "kolom password_hash tidak ada",
+	}
+	for in, want := range cases {
+		if got := RedactString(in); got != want {
+			t.Errorf("RedactString(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
