@@ -13,6 +13,9 @@ import type {
   GroupDetail,
   Items,
   JobStatusResponse,
+  MigrationInput,
+  MigrationItem,
+  Paged,
   PendingApproval,
   SchemaOverview,
   TableDataResponse,
@@ -37,6 +40,9 @@ export const keys = {
   connections: ['admin', 'databases'] as const,
   connection: (id: number) => ['admin', 'databases', id] as const,
   approvals: ['approvals'] as const,
+  migrations: (dbId: number) => ['databases', dbId, 'migrations'] as const,
+  migration: (dbId: number, id: number) => ['databases', dbId, 'migrations', id] as const,
+  executionsAll: (dbId: number) => ['databases', dbId, 'executions'] as const,
 }
 
 export const useAccessibleDatabases = () =>
@@ -164,3 +170,37 @@ export function useAction<TVars = void, TResult = void>(
     },
   })
 }
+
+// --- Definisi migration (A6) ---
+const validId = (n: number) => Number.isFinite(n) && n > 0
+
+export const useMigrations = (dbId: number) =>
+  useQuery({
+    queryKey: keys.migrations(dbId),
+    queryFn: () => api.get<Paged<MigrationItem>>(`/api/databases/${dbId}/migrations?page_size=200`),
+    enabled: validId(dbId),
+  })
+
+export const useMigration = (dbId: number, id: number) =>
+  useQuery({
+    queryKey: keys.migration(dbId, id),
+    queryFn: () => api.get<MigrationItem>(`/api/databases/${dbId}/migrations/${id}`),
+    enabled: validId(dbId) && validId(id),
+  })
+
+/** Riwayat execution terbaru (tanpa filter Hide rollback) untuk menurunkan status tiap migration. */
+export const useRecentExecutions = (dbId: number) =>
+  useQuery({
+    queryKey: [...keys.executionsAll(dbId), 'recent'],
+    queryFn: () => api.get<Paged<ExecutionItem>>(`/api/databases/${dbId}/executions?page_size=200`),
+    enabled: validId(dbId),
+  })
+
+export const createMigration = (dbId: number, input: MigrationInput) =>
+  api.post<MigrationItem>(`/api/databases/${dbId}/migrations`, input)
+
+export const updateMigration = (dbId: number, id: number, input: MigrationInput) =>
+  api.put<MigrationItem>(`/api/databases/${dbId}/migrations/${id}`, input)
+
+export const validateMigration = (dbId: number, id: number, input: MigrationInput) =>
+  api.post<{ valid: boolean }>(`/api/databases/${dbId}/migrations/${id}/validate`, input)

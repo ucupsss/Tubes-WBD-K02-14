@@ -13,6 +13,9 @@ import { ExecutionHistoryPage } from './pages/executions/ExecutionHistory'
 import { SchemaOverviewPage } from './pages/explorer/SchemaOverview'
 import { TableDataPage } from './pages/explorer/TableData'
 import { TableDetailPage } from './pages/explorer/TableDetail'
+import { MigrationDetailPage } from './pages/migrations/MigrationDetail'
+import { MigrationEditPage, MigrationNewPage } from './pages/migrations/MigrationForm'
+import { MigrationListPage } from './pages/migrations/MigrationList'
 
 function NotFound() {
   return (
@@ -43,6 +46,10 @@ export function App() {
         <Route path="db/:dbID" element={<SchemaOverviewPage />} />
         <Route path="db/:dbID/tables/:schema/:table" element={<TableDetailPage />} />
         <Route path="db/:dbID/tables/:schema/:table/data" element={<TableDataPage />} />
+        <Route path="db/:dbID/migrations" element={<MigrationListPage />} />
+        <Route path="db/:dbID/migrations/new" element={<MigrationNewPage />} />
+        <Route path="db/:dbID/migrations/:id" element={<MigrationDetailPage />} />
+        <Route path="db/:dbID/migrations/:id/edit" element={<MigrationEditPage />} />
         <Route path="db/:dbID/executions" element={<ExecutionHistoryPage />} />
         <Route path="executions/:execID" element={<ExecutionDetailPage />} />
         <Route

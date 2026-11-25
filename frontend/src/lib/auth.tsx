@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { createContext, useCallback, useContext, useEffect, useMemo, type ReactNode } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import { api, ApiError, refreshCsrfToken, setCsrfToken, setUnauthenticatedHandler } from '../api/client'
@@ -27,6 +27,15 @@ async function fetchMe(): Promise<Me | null> {
   }
 }
 
+/**
+ * Membuang data milik pengguna sebelumnya. Query `me` sengaja tidak dibuang: useQuery di AuthProvider
+ * terikat pada objek query itu, dan query yang dibuang (mis. lewat qc.clear()) tidak lagi
+ * mengabarkan data barunya, sehingga guard tetap menganggap pengguna belum login.
+ */
+export function resetCacheKeepingMe(qc: QueryClient) {
+  qc.removeQueries({ predicate: q => q.queryKey[0] !== keys.me[0] })
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient()
   const { data, isLoading } = useQuery({ queryKey: keys.me, queryFn: fetchMe, staleTime: 60_000, retry: false })
@@ -44,8 +53,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await refreshCsrfToken() // token pre-login (double-submit cookie)
       const res = await api.post<LoginResult>('/api/auth/login', { username, password })
       setCsrfToken(res.csrf_token)
-      qc.clear()
-      await qc.fetchQuery({ queryKey: keys.me, queryFn: fetchMe })
+      resetCacheKeepingMe(qc)
+      qc.setQueryData(keys.me, await fetchMe())
     },
     [qc],
   )
@@ -55,7 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await api.post('/api/auth/logout')
     } finally {
       setCsrfToken('')
-      qc.clear()
+      resetCacheKeepingMe(qc)
       qc.setQueryData(keys.me, null)
     }
   }, [qc])

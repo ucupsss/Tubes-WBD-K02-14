@@ -33,3 +33,19 @@ func CreateDraft(t *testing.T, db platformdb.DBTX, dbID, userID int64, sqlText s
 	}
 	return id
 }
+
+// CreateExecution menyisipkan migration draft beserta satu execution apply berstatus pending_review
+// pada database dbID, lalu mengembalikan id execution-nya.
+func CreateExecution(t *testing.T, db platformdb.DBTX, dbID, userID int64) int64 {
+	t.Helper()
+	mig := CreateDraft(t, db, dbID, userID, "SELECT 1")
+	var id int64
+	if err := db.QueryRow(context.Background(), `
+		INSERT INTO executions (database_id, migration_id, revision_id, kind, status, requested_by)
+		SELECT $1, m.id, m.current_revision_id, 'apply', 'pending_review', $3
+		FROM migrations m WHERE m.id = $2
+		RETURNING id`, dbID, mig, userID).Scan(&id); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+	return id
+}

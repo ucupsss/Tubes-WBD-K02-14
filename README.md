@@ -151,7 +151,7 @@ Menyembunyikan tombol di antarmuka bukan otorisasi; setiap aksi dicek ulang di b
 
 ## Frontend (SPA) dan API
 
-Seluruh halaman login, administrasi (user, group, leader, akses database, koneksi database), inbox approval, dashboard, **database explorer** (katalog skema, struktur tabel, data baris berpaginasi, analisis EXPLAIN), serta **eksekusi & riwayat migration** (monitor job asinkron, filter Hide rollback, detail execution, attempt, dan checkpoint batch) disajikan sebagai SPA.
+Seluruh halaman login, administrasi (user, group, leader, akses database, koneksi database), inbox approval, dashboard, **database explorer** (katalog skema, struktur tabel, data baris berpaginasi, analisis EXPLAIN), **definisi migration** (daftar, editor SQL up/down, irreversible beserta alasan, mode normal atau batch dengan konfigurasinya, detail dengan alur status dan keputusan leader per group, tombol Submit for review), serta **eksekusi & riwayat migration** (monitor job asinkron, filter Hide rollback, detail execution, attempt, dan checkpoint batch) disajikan sebagai SPA.
 
 - **Responsif**: navigasi menjadi menu hamburger di layar sempit, tabel menjadi kartu bertumpuk di mobile, tabel data lebar (`.data-grid-wrap`) scroll horizontal di dalam komponennya (bukan di halaman), dan semua kontrol berukuran minimal 44 px. Diuji pada lebar 360 px dan 1280 px.
 - **Satu pintu ke backend**: semua request lewat `apiFetch` (`frontend/src/api/client.ts`) yang memasang token CSRF, menyeragamkan error, dan mengosongkan sesi saat server menjawab 401.
