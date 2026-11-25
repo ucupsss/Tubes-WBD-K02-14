@@ -81,6 +81,15 @@ describe('migrationState', () => {
     expect(s).toMatchObject({ label: 'Di-rollback', canSubmit: false })
   })
 
+  it('partial menahan migration sampai batch-nya di-revert', () => {
+    const partial = exec(5, 'partial')
+    const pending = { ...exec(6, 'pending_review', 'rollback'), rolls_back_execution_id: 5 }
+    expect(migrationState(migration({}, FROZEN), [partial]).open).toBe(true)
+    expect(migrationState(migration({}, FROZEN), [partial, pending]).open).toBe(true)
+    const done = { ...pending, status: 'success' as const }
+    expect(migrationState(migration({}, FROZEN), [partial, done])).toMatchObject({ open: false, label: 'Di-rollback' })
+  })
+
   it('hanya memakai execution milik migration itu', () => {
     expect(executionsOf(1, [exec(1, 'failed'), exec(2, 'success', 'apply', 2), exec(3, 'rejected')]).map(e => e.id)).toEqual([3, 1])
   })

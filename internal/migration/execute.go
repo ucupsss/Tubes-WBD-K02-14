@@ -251,7 +251,9 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 	})
 
 	version := int32(0)
-	if w.Kind == KindRollback {
+	if w.RevertsPartial() {
+		// Tidak ada posisi rantai yang dilepas: execution partial belum pernah menjadi aktif.
+	} else if w.Kind == KindRollback {
 		if w.Version == nil {
 			return e.fail(ctx, w, job, "not_active", "Migration ini tidak sedang aktif", down)
 		}
@@ -446,7 +448,15 @@ func (e *Executor) revalidate(ctx context.Context, w Work) error {
 	if blocked {
 		return haltFail("blocked", "Masih ada eksekusi yang belum selesai pada database ini")
 	}
-	if w.Kind == KindRollback {
+	if w.RevertsPartial() {
+		// Revert batch committed: hanya mungkin untuk mode batch, dan migration-nya tidak pernah aktif.
+		if w.ExecMode != ModeBatch {
+			return haltFail("invalid", "Hanya eksekusi batch yang dapat di-revert dari status partial")
+		}
+		if w.Irreversible {
+			return haltFail("irreversible", "Migration ini ditandai tidak dapat di-rollback")
+		}
+	} else if w.Kind == KindRollback {
 		top, err := e.repo.TopVersion(ctx, w.DatabaseID)
 		if err != nil {
 			return err

@@ -159,7 +159,11 @@ func (s *Service) open(ctx context.Context, p authz.Principal, databaseID, id in
 			RequestedBy:   p.UserID,
 			ApprovalRound: 1,
 		}
-		if kind == KindRollback {
+		if kind == KindRollback && h.PartialID != nil {
+			// Revert batch committed: down SQL dari revisi yang benar-benar dijalankan execution partial.
+			e.RollsBackExecutionID = h.PartialID
+			e.RevisionID = h.PartialRevisionID
+		} else if kind == KindRollback {
 			target, revisionID, err := s.repo.ActiveSuccessID(ctx, q, id)
 			if err != nil {
 				return err

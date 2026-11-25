@@ -49,6 +49,16 @@ func (s *Service) publish(ctx context.Context, p authz.Principal, execID int64, 
 			if status != StatusPartial && status != StatusPartiallyReverted {
 				return ErrNotResumable
 			}
+			if status == StatusPartial {
+				// Batch yang sudah/sedang dibatalkan tidak boleh diterapkan ulang lewat resume.
+				reverted, err := s.repo.HasActiveRevert(ctx, q, execID)
+				if err != nil {
+					return err
+				}
+				if reverted {
+					return ErrReverted
+				}
+			}
 		} else if status == StatusQueued {
 			id, err := s.jobs.Enqueue(ctx, q, execID, databaseID, carrier)
 			if errors.Is(err, queue.ErrRunning) {

@@ -129,6 +129,7 @@ var (
 	ErrRejectedSQL    = apperr.Invalid("SQL ditolak: perintah transaction control, VACUUM, CREATE DATABASE, atau CREATE INDEX CONCURRENTLY tidak diizinkan")
 	ErrNotApproved    = apperr.Conflict("Eksekusi belum disetujui").WithReason("not_approved")
 	ErrNotResumable   = apperr.Conflict("Hanya eksekusi yang berhenti di tengah yang dapat dilanjutkan").WithReason("not_resumable")
+	ErrReverted       = apperr.Conflict("Batch eksekusi ini sudah atau sedang di-revert, jadi tidak dapat dilanjutkan").WithReason("reverted")
 	ErrNotCancellable = apperr.Conflict("Eksekusi ini tidak dapat dibatalkan").WithReason("not_cancellable")
 	ErrJobRunning     = apperr.Conflict("Eksekusi sedang berjalan").WithReason("job_running")
 	ErrJobNotFound    = apperr.NotFound("Job tidak ditemukan")
