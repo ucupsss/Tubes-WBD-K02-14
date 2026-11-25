@@ -353,3 +353,54 @@ export interface JobStatusResponse {
   queue_wait_ms?: number
   error_message?: string | null
 }
+
+// --- Definisi migration (A6, API milik C1) ---
+
+export type ExecMode = 'normal' | 'batch'
+
+export interface MigrationRevision {
+  id: number
+  revision_no: number
+  up_sql: string
+  down_sql: string | null
+  irreversible: boolean
+  irreversible_reason: string | null
+  exec_mode: ExecMode
+  batch_table: string | null
+  batch_column: string | null
+  batch_size: number | null
+  sql_hash: string
+  /** Terisi setelah revisi pertama kali diajukan; sejak itu isi SQL-nya tidak bisa diubah. */
+  frozen_at: string | null
+}
+
+export interface MigrationItem {
+  id: number
+  database_id: number
+  title: string
+  /** Posisi di rantai aktif; null bila belum (atau tidak lagi) aktif. */
+  version: number | null
+  created_by: number
+  created_by_username: string
+  created_at: string
+  revision: MigrationRevision
+}
+
+export interface MigrationInput {
+  title: string
+  up_sql: string
+  down_sql: string
+  irreversible: boolean
+  irreversible_reason: string
+  exec_mode: ExecMode
+  batch_table: string
+  batch_column: string
+  batch_size: number
+}
+
+export interface Paged<T> {
+  items: T[]
+  page: number
+  page_size: number
+  total: number
+}

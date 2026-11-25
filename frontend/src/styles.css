@@ -631,3 +631,98 @@ tr:last-child td {
     animation: none !important;
   }
 }
+
+/* ---- Definisi migration (A6) ---- */
+.sql-editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  tab-size: 2;
+}
+.fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 8px 0 16px;
+}
+.kv dt {
+  color: var(--muted);
+}
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.workflow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 4px;
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+}
+.workflow-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.workflow-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.workflow-step.is-done {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.workflow-step.is-done .workflow-dot {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--surface);
+}
+.workflow-step.is-current {
+  color: var(--text);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.workflow-step.is-current .workflow-dot {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.workflow-step.is-failed {
+  color: var(--danger);
+  border-color: var(--danger);
+  font-weight: 600;
+}
+.workflow-step.is-failed .workflow-dot {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--surface);
+}
+@media (max-width: 640px) {
+  .kv {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .kv dd {
+    margin-bottom: 8px;
+  }
+}
