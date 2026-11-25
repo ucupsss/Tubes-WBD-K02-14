@@ -7,13 +7,15 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/approval"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/testutil"
 )
 
-// memExecs menggantikan tabel executions milik C: tabel execution_approvals tidak punya FK ke sana.
+// memExecs menggantikan status/ronde milik modul execution (C). Baris executions-nya tetap dibuat
+// sungguhan karena execution_approvals.execution_id ber-FK ke executions (0502).
 type memExecs struct {
 	info   approval.ExecInfo
 	status string
@@ -37,6 +39,7 @@ func (m *memExecs) SetRound(_ context.Context, _ platformdb.DBTX, _ int64, r int
 
 type env struct {
 	pool            *pgxpool.Pool
+	execID          int64
 	svc             *approval.Service
 	execs           *memExecs
 	dbID            int64
@@ -44,8 +47,6 @@ type env struct {
 	analystGroup    int64
 	alice, bob, eve int64
 }
-
-const execID = int64(501)
 
 // setup: dev (leader alice) dan analyst (leader bob) sama-sama punya akses ke satu database.
 func setup(t *testing.T) *env {
@@ -65,6 +66,7 @@ func setup(t *testing.T) *env {
 	e.setLeader(t, e.devGroup, &e.alice)
 	e.setLeader(t, e.analystGroup, &e.bob)
 
+	e.execID = testutil.CreateExecution(t, pool, e.dbID, e.alice)
 	e.execs = &memExecs{info: approval.ExecInfo{DatabaseID: e.dbID, Round: 1, Status: approval.StatusPendingReview}}
 	e.svc = approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), e.execs)
 	return e
@@ -79,21 +81,21 @@ func (e *env) setLeader(t *testing.T, groupID int64, userID *int64) {
 
 func (e *env) open(t *testing.T, round int) {
 	t.Helper()
-	if err := e.svc.OpenRound(context.Background(), e.pool, execID, e.dbID, round); err != nil {
+	if err := e.svc.OpenRound(context.Background(), e.pool, e.execID, e.dbID, round); err != nil {
 		t.Fatalf("OpenRound: %v", err)
 	}
 }
 
 func (e *env) decide(t *testing.T, userID int64, ok bool) (approval.Outcome, error) {
 	t.Helper()
-	return e.svc.Decide(context.Background(), principal(userID), execID, ok, "")
+	return e.svc.Decide(context.Background(), principal(userID), e.execID, ok, "")
 }
 
 func TestApproval_AllLeadersMustApprove(t *testing.T) {
 	e := setup(t)
 	e.open(t, 1)
 
-	items, _ := e.svc.ListByExecution(context.Background(), execID)
+	items, _ := e.svc.ListByExecution(context.Background(), e.execID)
 	if len(items) != 2 {
 		t.Fatalf("baris approval = %d, want 2 (satu per group dengan akses view/edit)", len(items))
 	}
@@ -105,7 +107,7 @@ func TestApproval_AllLeadersMustApprove(t *testing.T) {
 	if err != nil || out.Status != approval.StatusApproved || e.execs.status != approval.StatusApproved {
 		t.Fatalf("bob: out=%v status=%q err=%v", out, e.execs.status, err)
 	}
-	v, err := e.svc.Verify(context.Background(), e.pool, execID, e.dbID, 1)
+	v, err := e.svc.Verify(context.Background(), e.pool, e.execID, e.dbID, 1)
 	if err != nil || !v.Complete {
 		t.Fatalf("Verify: %+v err=%v", v, err)
 	}
@@ -132,7 +134,7 @@ func TestApproval_RejectEndsExecution(t *testing.T) {
 	if err != nil || out.Status != approval.StatusRejected || e.execs.status != approval.StatusRejected {
 		t.Fatalf("out=%v status=%q err=%v", out, e.execs.status, err)
 	}
-	v, _ := e.svc.Verify(context.Background(), e.pool, execID, e.dbID, 1)
+	v, _ := e.svc.Verify(context.Background(), e.pool, e.execID, e.dbID, 1)
 	if v.Complete {
 		t.Fatal("execution rejected tidak boleh dianggap complete")
 	}
@@ -184,7 +186,7 @@ func TestApproval_LeaderChangeInvalidatesApproval(t *testing.T) {
 	_, _ = e.decide(t, e.bob, true)
 
 	e.setLeader(t, e.analystGroup, &e.eve) // leader berganti setelah approval
-	v, err := e.svc.Verify(context.Background(), e.pool, execID, e.dbID, 1)
+	v, err := e.svc.Verify(context.Background(), e.pool, e.execID, e.dbID, 1)
 	if err != nil || v.Complete || len(v.MissingGroupIDs) != 1 || v.MissingGroupIDs[0] != e.analystGroup {
 		t.Fatalf("Verify: %+v err=%v", v, err)
 	}
@@ -199,12 +201,12 @@ func TestApproval_NewGroupWithAccessInvalidatesAndRevokeOpensRound2(t *testing.T
 	ops := testutil.CreateGroup(t, e.pool, "ops")
 	testutil.Grant(t, e.pool, ops, e.dbID, "view")
 
-	v, _ := e.svc.Verify(context.Background(), e.pool, execID, e.dbID, 1)
+	v, _ := e.svc.Verify(context.Background(), e.pool, e.execID, e.dbID, 1)
 	if v.Complete || len(v.MissingGroupIDs) != 1 || v.MissingGroupIDs[0] != ops {
 		t.Fatalf("group baru seharusnya membuat approval tidak lengkap: %+v", v)
 	}
 
-	round, err := e.svc.Revoke(context.Background(), e.pool, execID, e.dbID)
+	round, err := e.svc.Revoke(context.Background(), e.pool, e.execID, e.dbID)
 	if err != nil || round != 2 {
 		t.Fatalf("Revoke: round=%d err=%v", round, err)
 	}
@@ -213,11 +215,11 @@ func TestApproval_NewGroupWithAccessInvalidatesAndRevokeOpensRound2(t *testing.T
 	}
 	e.execs.status = "" // kembali ke info.Status = pending_review
 
-	items, _ := e.svc.ListByExecution(context.Background(), execID)
+	items, _ := e.svc.ListByExecution(context.Background(), e.execID)
 	if len(items) != 2+3 {
 		t.Fatalf("baris = %d, want 5 (ronde 1: 2, ronde 2: 3 group)", len(items))
 	}
-	v2, _ := e.svc.Verify(context.Background(), e.pool, execID, e.dbID, 2)
+	v2, _ := e.svc.Verify(context.Background(), e.pool, e.execID, e.dbID, 2)
 	if v2.Complete || len(v2.MissingGroupIDs) != 3 {
 		t.Fatalf("ronde baru harus mulai dari nol: %+v", v2)
 	}
@@ -227,7 +229,7 @@ func TestApproval_PendingInboxShowsOnlyLatestRound(t *testing.T) {
 	e := setup(t)
 	e.open(t, 1)
 	items, err := e.svc.Pending(context.Background(), e.bob)
-	if err != nil || len(items) != 1 || items[0].ExecutionID != execID || items[0].GroupID != e.analystGroup {
+	if err != nil || len(items) != 1 || items[0].ExecutionID != e.execID || items[0].GroupID != e.analystGroup {
 		t.Fatalf("inbox bob: %+v err=%v", items, err)
 	}
 	if items, _ := e.svc.Pending(context.Background(), e.eve); len(items) != 0 {
@@ -245,8 +247,29 @@ func TestApproval_OpenRoundWithoutAccessFails(t *testing.T) {
 	e := setup(t)
 	name, _ := testutil.NewTargetDB(t, "")
 	lonely := testutil.CreateConnection(t, e.pool, name)
-	err := e.svc.OpenRound(context.Background(), e.pool, execID+1, lonely, 1)
+	err := e.svc.OpenRound(context.Background(), e.pool, testutil.CreateExecution(t, e.pool, lonely, e.alice), lonely, 1)
 	if !errors.Is(err, approval.ErrNoGroups) {
 		t.Fatalf("err = %v, want ErrNoGroups", err)
+	}
+}
+
+func TestApproval_ExecutionForeignKey(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+
+	_, err := e.pool.Exec(ctx, `
+		INSERT INTO execution_approvals (execution_id, round, group_id) VALUES ($1, 1, $2)`,
+		e.execID+1_000_000, e.devGroup)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+		t.Fatalf("approval untuk execution yang tidak ada harus ditolak FK, err = %v", err)
+	}
+
+	e.open(t, 1)
+	if _, err := e.pool.Exec(ctx, `DELETE FROM executions WHERE id = $1`, e.execID); err != nil {
+		t.Fatalf("hapus execution: %v", err)
+	}
+	if items, _ := e.svc.ListByExecution(ctx, e.execID); len(items) != 0 {
+		t.Fatalf("approval harus ikut terhapus (ON DELETE CASCADE), sisa %d", len(items))
 	}
 }

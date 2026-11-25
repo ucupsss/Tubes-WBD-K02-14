@@ -1,0 +1,1 @@
+ALTER TABLE execution_approvals DROP CONSTRAINT IF EXISTS execution_approvals_execution_id_fkey;
