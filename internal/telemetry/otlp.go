@@ -4,125 +4,48 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// otlpHTTPExporter mengirim span ke OpenTelemetry Collector melalui protokol OTLP/HTTP JSON (/v1/traces).
-// Diimplementasikan menggunakan net/http standar agar tidak menambah ketergantungan gRPC/protobuf eksternal.
-type otlpHTTPExporter struct {
-	endpoint    string
-	serviceName string
-	client      *http.Client
-}
-
-func newOTLPHTTPExporter(endpoint, serviceName string) *otlpHTTPExporter {
-	ep := strings.TrimRight(strings.TrimSpace(endpoint), "/")
-	if !strings.HasSuffix(ep, "/v1/traces") {
-		ep += "/v1/traces"
-	}
+// newOTLPTraceExporter membuat exporter trace OTLP/HTTP resmi (protobuf) menuju OpenTelemetry Collector.
+// Menerima endpoint dengan atau tanpa skema, mis. "http://localhost:4318" atau "localhost:4318".
+func newOTLPTraceExporter(ctx context.Context, rawEndpoint string) (sdktrace.SpanExporter, error) {
+	ep := strings.TrimSpace(rawEndpoint)
 	if !strings.HasPrefix(ep, "http://") && !strings.HasPrefix(ep, "https://") {
 		ep = "http://" + ep
 	}
-	return &otlpHTTPExporter{
-		endpoint:    ep,
-		serviceName: serviceName,
-		client:      &http.Client{Timeout: 5 * time.Second},
-	}
-}
-
-func (e *otlpHTTPExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
-	if len(spans) == 0 {
-		return nil
-	}
-	payload := buildOTLPTracePayload(e.serviceName, spans)
-	raw, err := json.Marshal(payload)
+	u, err := url.Parse(ep)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.endpoint, bytes.NewReader(raw))
-	if err != nil {
-		return err
+	opts := []otlptracehttp.Option{
+		otlptracehttp.WithEndpoint(u.Host),
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
+	if u.Scheme == "http" {
+		opts = append(opts, otlptracehttp.WithInsecure())
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("otlp trace export status %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func (e *otlpHTTPExporter) Shutdown(context.Context) error {
-	return nil
-}
-
-func buildOTLPTracePayload(serviceName string, spans []sdktrace.ReadOnlySpan) map[string]any {
-	otlpSpans := make([]map[string]any, 0, len(spans))
-	for _, s := range spans {
-		sc := s.SpanContext()
-		parentID := ""
-		if s.Parent().IsValid() {
-			parentID = s.Parent().SpanID().String()
+	if p := strings.TrimRight(u.Path, "/"); p != "" {
+		if !strings.HasSuffix(p, "/v1/traces") {
+			p += "/v1/traces"
 		}
-		attrs := make([]map[string]any, 0, len(s.Attributes()))
-		for _, kv := range s.Attributes() {
-			attrs = append(attrs, map[string]any{
-				"key":   string(kv.Key),
-				"value": map[string]any{"stringValue": kv.Value.Emit()},
-			})
-		}
-		otlpSpans = append(otlpSpans, map[string]any{
-			"traceId":           sc.TraceID().String(),
-			"spanId":            sc.SpanID().String(),
-			"parentSpanId":      parentID,
-			"name":              s.Name(),
-			"kind":              int(s.SpanKind()),
-			"startTimeUnixNano": strconv.FormatInt(s.StartTime().UnixNano(), 10),
-			"endTimeUnixNano":   strconv.FormatInt(s.EndTime().UnixNano(), 10),
-			"attributes":        attrs,
-			"status": map[string]any{
-				"code":    int(s.Status().Code),
-				"message": s.Status().Description,
-			},
-		})
+		opts = append(opts, otlptracehttp.WithURLPath(p))
 	}
-	return map[string]any{
-		"resourceSpans": []map[string]any{
-			{
-				"resource": map[string]any{
-					"attributes": []map[string]any{
-						{
-							"key":   "service.name",
-							"value": map[string]any{"stringValue": serviceName},
-						},
-					},
-				},
-				"scopeSpans": []map[string]any{
-					{
-						"scope": map[string]any{"name": tracerName},
-						"spans": otlpSpans,
-					},
-				},
-			},
-		},
-	}
+	return otlptracehttp.New(ctx, opts...)
 }
 
 // LogForwarder meneruskan setiap baris JSON log yang ditulis oleh logx ke OpenTelemetry Collector
-// (/v1/logs) atau Loki (/loki/api/v1/push) secara asinkron tanpa menghambat stdout.
+// (/v1/logs) secara asinkron tanpa menghambat stdout. Seluruh log masuk melalui Collector
+// (bukan langsung ke Loki) agar jalur observability tunggal dan tidak menggandakan log.
 type LogForwarder struct {
 	otlpLogsURL string
-	lokiPushURL string
 	serviceName string
 	client      *http.Client
 	ch          chan []byte
@@ -130,8 +53,8 @@ type LogForwarder struct {
 	once        sync.Once
 }
 
-// NewLogForwarder membuat penulis log asinkron ke OTel Collector (otlpEndpoint/v1/logs) dan/atau Loki.
-func NewLogForwarder(serviceName, otlpEndpoint, lokiURL string) *LogForwarder {
+// NewLogForwarder membuat penulis log asinkron ke OTel Collector (otlpEndpoint/v1/logs).
+func NewLogForwarder(serviceName, otlpEndpoint string) *LogForwarder {
 	otlpLogs := strings.TrimRight(strings.TrimSpace(otlpEndpoint), "/")
 	if otlpLogs != "" {
 		if !strings.HasSuffix(otlpLogs, "/v1/logs") {
@@ -141,21 +64,11 @@ func NewLogForwarder(serviceName, otlpEndpoint, lokiURL string) *LogForwarder {
 			otlpLogs = "http://" + otlpLogs
 		}
 	}
-	lokiPush := strings.TrimRight(strings.TrimSpace(lokiURL), "/")
-	if lokiPush != "" {
-		if !strings.HasSuffix(lokiPush, "/loki/api/v1/push") {
-			lokiPush += "/loki/api/v1/push"
-		}
-		if !strings.HasPrefix(lokiPush, "http://") && !strings.HasPrefix(lokiPush, "https://") {
-			lokiPush = "http://" + lokiPush
-		}
-	}
 	if serviceName == "" {
 		serviceName = "dbmp-server"
 	}
 	f := &LogForwarder{
 		otlpLogsURL: otlpLogs,
-		lokiPushURL: lokiPush,
 		serviceName: serviceName,
 		client:      &http.Client{Timeout: 3 * time.Second},
 		ch:          make(chan []byte, 512),
@@ -167,7 +80,7 @@ func NewLogForwarder(serviceName, otlpEndpoint, lokiURL string) *LogForwarder {
 
 // Write memenuhi io.Writer sehingga dapat digabungkan dengan io.MultiWriter(os.Stdout, forwarder).
 func (f *LogForwarder) Write(p []byte) (int, error) {
-	if f == nil || (f.otlpLogsURL == "" && f.lokiPushURL == "") {
+	if f == nil || f.otlpLogsURL == "" {
 		return len(p), nil
 	}
 	cp := bytes.TrimSpace(append([]byte(nil), p...))
@@ -202,6 +115,9 @@ func (f *LogForwarder) loop() {
 }
 
 func (f *LogForwarder) ship(line []byte) {
+	if f.otlpLogsURL == "" {
+		return
+	}
 	var parsed map[string]any
 	_ = json.Unmarshal(line, &parsed)
 
@@ -218,74 +134,74 @@ func (f *LogForwarder) ship(line []byte) {
 	corrID, _ := parsed["correlation_id"].(string)
 	nowNano := strconv.FormatInt(time.Now().UnixNano(), 10)
 
-	if f.otlpLogsURL != "" {
-		rec := map[string]any{
-			"timeUnixNano": nowNano,
-			"severityText": level,
-			"body":         map[string]any{"stringValue": string(line)},
-			"attributes": []map[string]any{
-				{"key": "event", "value": map[string]any{"stringValue": event}},
-				{"key": "correlation_id", "value": map[string]any{"stringValue": corrID}},
-			},
-		}
-		if len(traceID) == 32 {
-			rec["traceId"] = traceID
-		}
-		if len(spanID) == 16 {
-			rec["spanId"] = spanID
-		}
-		payload := map[string]any{
-			"resourceLogs": []map[string]any{
-				{
-					"resource": map[string]any{
-						"attributes": []map[string]any{
-							{"key": "service.name", "value": map[string]any{"stringValue": f.serviceName}},
-						},
-					},
-					"scopeLogs": []map[string]any{
-						{
-							"scope":      map[string]any{"name": tracerName},
-							"logRecords": []map[string]any{rec},
-						},
-					},
-				},
-			},
-		}
-		if raw, err := json.Marshal(payload); err == nil {
-			req, err := http.NewRequest(http.MethodPost, f.otlpLogsURL, bytes.NewReader(raw))
-			if err == nil {
-				req.Header.Set("Content-Type", "application/json")
-				if resp, err := f.client.Do(req); err == nil {
-					_ = resp.Body.Close()
-				}
-			}
-		}
+	attrs := []map[string]any{
+		{"key": "event", "value": map[string]any{"stringValue": event}},
+	}
+	if corrID != "" {
+		attrs = append(attrs, map[string]any{
+			"key":   "correlation_id",
+			"value": map[string]any{"stringValue": corrID},
+		})
 	}
 
-	if f.lokiPushURL != "" {
-		// Label Loki dibatasi ketat (service, level) tanpa user_id, job_id, atau SQL sebagai label
-		// sesuai panduan bagian 6 untuk mencegah ledakan kardinalitas.
-		lokiPayload := map[string]any{
-			"streams": []map[string]any{
-				{
-					"stream": map[string]string{
-						"service": f.serviceName,
-						"level":   level,
+	rec := map[string]any{
+		"timeUnixNano":         nowNano,
+		"observedTimeUnixNano": nowNano,
+		"severityNumber":       severityNumber(level),
+		"severityText":         level,
+		"body":                 map[string]any{"stringValue": string(line)},
+		"attributes":           attrs,
+	}
+	if len(traceID) == 32 {
+		rec["traceId"] = traceID
+	}
+	if len(spanID) == 16 {
+		rec["spanId"] = spanID
+	}
+
+	payload := map[string]any{
+		"resourceLogs": []map[string]any{
+			{
+				"resource": map[string]any{
+					"attributes": []map[string]any{
+						{"key": "service.name", "value": map[string]any{"stringValue": f.serviceName}},
 					},
-					"values": [][]string{
-						{nowNano, string(line)},
+				},
+				"scopeLogs": []map[string]any{
+					{
+						"scope":      map[string]any{"name": tracerName},
+						"logRecords": []map[string]any{rec},
 					},
 				},
 			},
-		}
-		if raw, err := json.Marshal(lokiPayload); err == nil {
-			req, err := http.NewRequest(http.MethodPost, f.lokiPushURL, bytes.NewReader(raw))
-			if err == nil {
-				req.Header.Set("Content-Type", "application/json")
-				if resp, err := f.client.Do(req); err == nil {
-					_ = resp.Body.Close()
-				}
-			}
-		}
+		},
+	}
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, f.otlpLogsURL, bytes.NewReader(raw))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if resp, err := f.client.Do(req); err == nil {
+		_ = resp.Body.Close()
+	}
+}
+
+func severityNumber(level string) int {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "DEBUG":
+		return 5
+	case "INFO":
+		return 9
+	case "WARN", "WARNING":
+		return 13
+	case "ERROR":
+		return 17
+	default:
+		return 9
 	}
 }

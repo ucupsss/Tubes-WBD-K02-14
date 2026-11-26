@@ -109,7 +109,10 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		otlpEP = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	}
 	if otlpEP != "" {
-		otlpExp := newOTLPHTTPExporter(otlpEP, svcName)
+		otlpExp, err := newOTLPTraceExporter(ctx, otlpEP)
+		if err != nil {
+			return nil, err
+		}
 		if cfg.Sync {
 			opts = append(opts, sdktrace.WithSyncer(otlpExp))
 		} else {
@@ -128,15 +131,14 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 }
 
 // LogOutput mengembalikan io.Writer untuk logx.New yang menulis ke base (mis. os.Stdout)
-// dan, apabila OTEL_EXPORTER_OTLP_ENDPOINT atau LOKI_PUSH_URL diset, juga meneruskan log JSON
-// secara asinkron ke OpenTelemetry Collector / Loki untuk korelasi log-trace.
+// dan, apabila OTEL_EXPORTER_OTLP_ENDPOINT diset, juga meneruskan log JSON secara asinkron
+// ke OpenTelemetry Collector (/v1/logs) untuk diteruskan ke Loki dengan korelasi log-trace.
 func LogOutput(base io.Writer, serviceName string) (io.Writer, func() error) {
 	otlpEP := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	lokiURL := os.Getenv("LOKI_PUSH_URL")
-	if otlpEP == "" && lokiURL == "" {
+	if otlpEP == "" {
 		return base, func() error { return nil }
 	}
-	fwd := NewLogForwarder(serviceName, otlpEP, lokiURL)
+	fwd := NewLogForwarder(serviceName, otlpEP)
 	return io.MultiWriter(base, fwd), fwd.Close
 }
 
