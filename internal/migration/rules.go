@@ -11,6 +11,8 @@ type head struct {
 	HasFailed     bool
 	HasRolledBack bool
 	ActiveSuccess bool
+	// HasExecutions: migration pernah diajukan (revisi mana pun). Riwayatnya tidak boleh hilang.
+	HasExecutions bool
 	// PartialID adalah execution apply/forward terakhir yang berhenti partial dan belum di-revert
 	// sukses. Batch yang sudah committed di dalamnya boleh dibatalkan lewat execution rollback.
 	PartialID           *int64

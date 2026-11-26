@@ -194,3 +194,21 @@ func TestRevertPartial_IrreversibleRejected(t *testing.T) {
 		t.Fatalf("revert irreversible: err = %v, want ErrIrreversible", err)
 	}
 }
+
+// Migration yang pernah diajukan (lalu ditolak dan dibuatkan revisi baru yang belum diajukan) tidak boleh
+// dihapus: revisi lamanya masih dirujuk riwayat execution. Dulu ini menghasilkan 500 karena foreign key.
+func TestDelete_RejectedThenRevisedIsNotDeletable(t *testing.T) {
+	fx := newFixture(t, "edit")
+	ctx := context.Background()
+	m := create(t, fx, "Ditolak", "SELECT 1", "SELECT 1", false, "")
+	exec := submit(t, fx, m.ID)
+	if _, err := fx.platform.Exec(ctx, `UPDATE executions SET status = 'rejected' WHERE id = $1`, exec.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.srv.Service.Update(ctx, fx.editor, fx.dbID, m.ID, migration.Input{Title: "Ditolak", UpSQL: "SELECT 2", DownSQL: "SELECT 2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.srv.Service.Delete(ctx, fx.dbID, m.ID); !errors.Is(err, migration.ErrNotDeletable) {
+		t.Fatalf("hapus migration yang pernah diajukan: err = %v, want ErrNotDeletable", err)
+	}
+}

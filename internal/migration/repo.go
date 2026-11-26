@@ -237,6 +237,10 @@ func (r *PgRepo) LockHead(ctx context.Context, db platformdb.DBTX, databaseID, i
 		return Migration{}, head{}, fmt.Errorf("migration.LockHead open: %w", err)
 	}
 	if err := db.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM executions WHERE migration_id = $1)`, id).Scan(&h.HasExecutions); err != nil {
+		return Migration{}, head{}, fmt.Errorf("migration.LockHead executions: %w", err)
+	}
+	if err := db.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM executions WHERE migration_id = $1 AND status = 'failed')`, id).Scan(&h.HasFailed); err != nil {
 		return Migration{}, head{}, fmt.Errorf("migration.LockHead failed: %w", err)
 	}
