@@ -273,3 +273,21 @@ func TestApproval_ExecutionForeignKey(t *testing.T) {
 		t.Fatalf("approval harus ikut terhapus (ON DELETE CASCADE), sisa %d", len(items))
 	}
 }
+
+// Setelah execution final (mis. ditolak leader lain), baris pending leader lain tidak boleh muncul di inbox.
+func TestApproval_InboxHidesFinishedExecutions(t *testing.T) {
+	e := setup(t)
+	e.open(t, 1)
+	if items, _ := e.svc.Pending(context.Background(), e.alice); len(items) != 1 {
+		t.Fatalf("inbox alice sebelum ditolak = %d, want 1", len(items))
+	}
+	if _, err := e.decide(t, e.bob, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(context.Background(), `UPDATE executions SET status = 'rejected' WHERE id = $1`, e.execID); err != nil {
+		t.Fatal(err)
+	}
+	if items, _ := e.svc.Pending(context.Background(), e.alice); len(items) != 0 {
+		t.Fatalf("execution yang sudah ditolak masih di inbox alice: %+v", items)
+	}
+}

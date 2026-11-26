@@ -162,6 +162,7 @@ func (r *PgRepo) PendingForLeader(ctx context.Context, q platformdb.DBTX, userID
 		SELECT a.execution_id, a.round, a.group_id, g.name, a.created_at
 		FROM execution_approvals a
 		JOIN groups g ON g.id = a.group_id
+		JOIN executions e ON e.id = a.execution_id AND e.status = 'pending_review'
 		WHERE g.leader_id = $1
 		  AND a.decision = 'pending'
 		  AND a.round = (SELECT max(x.round) FROM execution_approvals x WHERE x.execution_id = a.execution_id)
