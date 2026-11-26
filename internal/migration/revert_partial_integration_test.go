@@ -212,3 +212,44 @@ func TestDelete_RejectedThenRevisedIsNotDeletable(t *testing.T) {
 		t.Fatalf("hapus migration yang pernah diajukan: err = %v, want ErrNotDeletable", err)
 	}
 }
+
+// Eksekusi yang berjalan lebih lama dari batas stale (30 detik) tidak boleh diklaim lagi selama
+// heartbeat-nya masih menyegarkan claimed_at. Dulu job seperti ini diklaim ulang, bahkan oleh worker
+// yang sama, sehingga dua run berjalan bersamaan.
+func TestClaim_TouchedLongRunningJobIsNotReclaimed(t *testing.T) {
+	fx := newFixture(t, "edit")
+	ctx := context.Background()
+	m := create(t, fx, "Panjang", "SELECT 1", "SELECT 1", false, "")
+	exec := submit(t, fx, m.ID)
+	setExecStatus(t, fx, exec.ID, migration.StatusApproved)
+	if _, err := fx.srv.Service.Enqueue(ctx, fx.editor, exec.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	q := queue.New(fx.platform)
+	first, err := q.Claim(ctx, "worker-a")
+	if err != nil || first == nil {
+		t.Fatal(err)
+	}
+	// Run sudah berjalan 2 menit, tapi heartbeat barusan menyegarkan claimed_at.
+	if _, err := fx.platform.Exec(ctx, `UPDATE migration_jobs SET claimed_at = now() - interval '2 minutes' WHERE id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Touch(ctx, fx.platform, first.ID, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []string{"worker-b", "worker-a"} {
+		if again, err := q.Claim(ctx, w); err != nil || again != nil {
+			t.Fatalf("%s mengklaim job yang masih berjalan: %+v %v", w, again, err)
+		}
+	}
+	// Touch dari worker lain tidak boleh menyegarkan klaim yang bukan miliknya.
+	if _, err := fx.platform.Exec(ctx, `UPDATE migration_jobs SET claimed_at = now() - interval '2 minutes' WHERE id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Touch(ctx, fx.platform, first.ID, "worker-x"); err != nil {
+		t.Fatal(err)
+	}
+	if taken, err := q.Claim(ctx, "worker-b"); err != nil || taken == nil {
+		t.Fatalf("job yang benar-benar ditinggalkan harus bisa diambil alih: %+v %v", taken, err)
+	}
+}

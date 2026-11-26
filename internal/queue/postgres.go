@@ -118,6 +118,19 @@ func (q *PgQueue) Complete(ctx context.Context, jobID int64, status string) erro
 	return nil
 }
 
+// Touch memperbarui claimed_at job yang masih dipegang workerID. Dipanggil dari heartbeat selama eksekusi
+// berjalan, supaya job yang lebih lama dari batas stale tidak dianggap ditinggalkan lalu diklaim lagi
+// (oleh worker lain, atau oleh worker yang sama, sehingga dua run berjalan bersamaan).
+func Touch(ctx context.Context, db platformdb.DBTX, jobID int64, workerID string) error {
+	_, err := db.Exec(ctx, `
+		UPDATE migration_jobs SET claimed_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND status = 'running'`, jobID, workerID)
+	if err != nil {
+		return fmt.Errorf("queue.Touch: %w", err)
+	}
+	return nil
+}
+
 // RestoreAttempt mengurangi hitungan attempt yang terpakai hanya karena kunci sedang sibuk.
 func (q *PgQueue) RestoreAttempt(ctx context.Context, jobID int64) error {
 	_, err := q.pool.Exec(ctx, `UPDATE migration_jobs SET attempts = GREATEST(attempts - 1, 0) WHERE id = $1`, jobID)

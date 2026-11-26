@@ -96,7 +96,8 @@ func TestIter1_Class08RetriesButNearbyCodesDoNot(t *testing.T) {
 	if !queue.Retryable("  08p01 ") || !queue.Retryable("08006") || !queue.Retryable("53300") {
 		t.Fatal("kode sementara tidak dikenali")
 	}
-	for _, code := range []string{"57P02", "53400", "40000", "42601", "55P03", "0800"} {
+	// 55P03 (lock_timeout) sengaja di-retry sejak uji worker crash: lihat D35.
+	for _, code := range []string{"57P02", "53400", "40000", "42601", "55P02", "0800"} {
 		if code != "0800" && queue.Retryable(code) {
 			t.Fatalf("%s tidak boleh di-retry", code)
 		}

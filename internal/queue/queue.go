@@ -59,14 +59,16 @@ func (e *SQLError) Error() string {
 	return e.SQLState
 }
 
-// Retryable melaporkan SQLSTATE yang boleh dicoba lagi (D35): kelas 08, 40001, 40P01, 57P01, 53300.
+// Retryable melaporkan SQLSTATE yang boleh dicoba lagi (D35): kelas 08, 40001, 40P01, 57P01, 53300, dan 55P03.
+// 55P03 (lock_timeout) berarti lock masih dipegang transaksi lain, mis. transaksi yatim milik worker yang mati
+// dan belum dibatalkan Postgres; setelah jeda, lock biasanya sudah lepas.
 func Retryable(sqlstate string) bool {
 	sqlstate = strings.ToUpper(strings.TrimSpace(sqlstate))
 	if len(sqlstate) >= 2 && sqlstate[:2] == "08" {
 		return true
 	}
 	switch sqlstate {
-	case "40001", "40P01", "57P01", "53300":
+	case "40001", "40P01", "57P01", "53300", "55P03":
 		return true
 	default:
 		return false

@@ -7,7 +7,7 @@ import (
 
 func TestRetryable(t *testing.T) {
 	t.Parallel()
-	for _, code := range []string{"08006", "08001", "08", "40001", "40P01", "57P01", "53300"} {
+	for _, code := range []string{"08006", "08001", "08", "40001", "40P01", "57P01", "53300", "55P03"} {
 		if !Retryable(code) {
 			t.Fatalf("%s harus di-retry", code)
 		}

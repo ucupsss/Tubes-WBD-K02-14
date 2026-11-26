@@ -41,13 +41,24 @@ func TestIter6_HeartbeatKeepsTryingAfterABlip(t *testing.T) {
 	lease := &flakyLease{fails: 1}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go heartbeat(ctx, lease)
+	var touchMu sync.Mutex
+	touches := 0
+	go heartbeat(ctx, lease, func(context.Context) error {
+		touchMu.Lock()
+		touches++
+		touchMu.Unlock()
+		return nil
+	})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		lease.mu.Lock()
 		beats := lease.beats
 		lease.mu.Unlock()
-		if beats >= 1 {
+		touchMu.Lock()
+		touched := touches
+		touchMu.Unlock()
+		// claimed_at job tetap disegarkan, termasuk pada tick saat perpanjangan lease gagal.
+		if beats >= 1 && touched >= 2 {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)

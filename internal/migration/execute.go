@@ -124,7 +124,9 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 	}
 	beat, stopBeat := context.WithCancel(ctx)
 	defer stopBeat()
-	go heartbeat(beat, lease)
+	go heartbeat(beat, lease, func(ctx context.Context) error {
+		return queue.Touch(ctx, e.pool, job.ID, job.ClaimedBy)
+	})
 
 	release := true
 	defer func() {
@@ -574,7 +576,8 @@ func haltFail(code, message string) error {
 // heartbeatEvery bisa dipendekkan tes. Produksi memakai jarak heartbeat kunci.
 var heartbeatEvery = lock.HeartbeatEvery
 
-func heartbeat(ctx context.Context, lease lock.Lease) {
+// heartbeat memperpanjang lease kunci database dan menyegarkan claimed_at job selama eksekusi berjalan.
+func heartbeat(ctx context.Context, lease lock.Lease, touchJob func(context.Context) error) {
 	t := time.NewTicker(heartbeatEvery)
 	defer t.Stop()
 	for {
@@ -584,7 +587,11 @@ func heartbeat(ctx context.Context, lease lock.Lease) {
 		case <-t.C:
 			if err := lease.Heartbeat(ctx); err != nil {
 				slog.WarnContext(ctx, "lock.heartbeat", "err", err, "database", lease.DatabaseID(), "execution_id", lease.ExecutionID())
-				continue
+			}
+			if touchJob != nil {
+				if err := touchJob(ctx); err != nil {
+					slog.WarnContext(ctx, "job.heartbeat", "err", err, "execution_id", lease.ExecutionID())
+				}
 			}
 		}
 	}
