@@ -7,6 +7,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -222,4 +223,15 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 		r.wroteHeader = true
 	}
 	return r.ResponseWriter.Write(b)
+}
+
+// End menutup span dan, bila err tidak nil, mencatat error serta status Error pada span.
+// Pesan error disamarkan dulu supaya credential tidak bocor ke backend tracing.
+func End(span trace.Span, err error) {
+	if err != nil {
+		msg := logx.RedactString(err.Error())
+		span.RecordError(errors.New(msg))
+		span.SetStatus(codes.Error, msg)
+	}
+	span.End()
 }

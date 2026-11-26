@@ -81,12 +81,18 @@ func IsSensitiveKey(key string) bool {
 	return false
 }
 
-// RedactString menyamarkan DSN (user:password@host) dan memotong string yang terlalu panjang.
+// kvSecretPattern menangkap pasangan rahasia gaya libpq/konfigurasi, mis. "password=abc" atau
+// "token: 'abc'", termasuk di dalam pesan error bebas.
+var kvSecretPattern = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|token|api_key)(\s*[=:]\s*)('[^']*'|"[^"]*"|[^\s,;&]+)`)
+
+// RedactString menyamarkan DSN (user:password@host) serta pasangan rahasia key=value, lalu memotong
+// string yang terlalu panjang.
 func RedactString(s string) string {
 	s = dsnPattern.ReplaceAllStringFunc(s, func(m string) string {
 		scheme := m[:strings.Index(m, "://")+3]
 		return scheme + Redacted
 	})
+	s = kvSecretPattern.ReplaceAllString(s, "${1}${2}"+Redacted)
 	return Truncate(s, MaxValueLen)
 }
 

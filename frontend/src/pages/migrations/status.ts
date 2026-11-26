@@ -32,6 +32,14 @@ export function executionsOf(migrationId: number, executions: ExecutionItem[]): 
   return executions.filter(e => e.migration_id === migrationId).sort((a, b) => b.id - a.id)
 }
 
+/** Execution partial yang batch committed-nya sudah dibatalkan oleh rollback sukses: tidak lagi terbuka. */
+export function isRevertedPartial(e: ExecutionItem, executions: ExecutionItem[]): boolean {
+  return (
+    e.status === 'partial' &&
+    executions.some(r => r.kind === 'rollback' && r.status === 'success' && r.rolls_back_execution_id === e.id)
+  )
+}
+
 /**
  * Menurunkan status tampilan satu migration dari datanya dan riwayat execution-nya.
  * Aturan sebenarnya tetap di server; ini hanya supaya UI tidak menawarkan aksi yang pasti ditolak.
@@ -39,7 +47,7 @@ export function executionsOf(migrationId: number, executions: ExecutionItem[]): 
 export function migrationState(m: MigrationItem, executions: ExecutionItem[]): MigrationState {
   const mine = executionsOf(m.id, executions)
   const latest = mine[0] ?? null
-  const open = mine.some(e => OPEN_STATUSES.includes(e.status))
+  const open = mine.some(e => OPEN_STATUSES.includes(e.status) && !isRevertedPartial(e, mine))
   const frozen = m.revision.frozen_at !== null
   const active = m.version !== null
 

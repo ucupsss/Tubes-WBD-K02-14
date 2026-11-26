@@ -20,6 +20,8 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/worker"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Checker adalah bagian approval yang dipakai saat revalidasi.
@@ -103,7 +105,7 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 	}
 	revalCtx, revalSpan := telemetry.Tracer().Start(ctx, "revalidate")
 	err = e.revalidate(revalCtx, w)
-	revalSpan.End()
+	telemetry.End(revalSpan, err)
 	if err != nil {
 		var halt *worker.Halt
 		if errors.As(err, &halt) {
@@ -113,7 +115,7 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 	}
 	lockCtx, lockSpan := telemetry.Tracer().Start(ctx, "lock.acquire")
 	lease, err := e.locks.Acquire(lockCtx, w.DatabaseID, w.ExecutionID, job.ClaimedBy, lock.DefaultLease)
-	lockSpan.End()
+	telemetry.End(lockSpan, err)
 	if errors.Is(err, lock.ErrBusy) {
 		return &worker.Halt{Disposition: worker.DispositionRetry, Message: lock.ErrBusy.Msg, Recorded: true}
 	}
@@ -167,7 +169,11 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 
 	logx.Audit(ctx, "start", slog.Int64("execution_id", w.ExecutionID), slog.Int64("database", w.DatabaseID), slog.String("kind", w.Kind))
 	start := time.Now()
-	runErr := applyTarget(ctx, target, w, job, version, sqlText)
+	execCtx, execSpan := telemetry.Tracer().Start(ctx, "target.exec", trace.WithAttributes(
+		attribute.Int64("execution_id", w.ExecutionID), attribute.String("kind", w.Kind), attribute.Int("attempt", job.Attempts)))
+	runErr := applyTarget(execCtx, target, w, job, version, sqlText)
+	telemetry.End(execSpan, runErr)
+	logTxOutcome(ctx, w, job, runErr)
 	logx.SQL(ctx, logx.SQLEvent{
 		Query: sqlText, Duration: time.Since(start), Rows: -1, Err: runErr,
 		MigrationID: w.MigrationID, ExecutionID: w.ExecutionID, JobID: job.ID, Attempt: job.Attempts,
@@ -251,7 +257,9 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 	})
 
 	version := int32(0)
-	if w.Kind == KindRollback {
+	if w.RevertsPartial() {
+		// Tidak ada posisi rantai yang dilepas: execution partial belum pernah menjadi aktif.
+	} else if w.Kind == KindRollback {
 		if w.Version == nil {
 			return e.fail(ctx, w, job, "not_active", "Migration ini tidak sedang aktif", down)
 		}
@@ -300,8 +308,10 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 			if res.Status == batch.StatusPartiallyReverted {
 				partialStatus = StatusPartiallyReverted
 			}
-			_ = e.repo.MarkPartial(ctx, w.ExecutionID, partialStatus, state, msg, res.BatchesCommitted, res.RowsCommitted)
-			_ = e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", state, msg, execSQL)
+			histCtx, span := historySpan(ctx, w, partialStatus)
+			_ = e.repo.MarkPartial(histCtx, w.ExecutionID, partialStatus, state, msg, res.BatchesCommitted, res.RowsCommitted)
+			_ = e.repo.InsertAttempt(histCtx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", state, msg, execSQL)
+			span.End()
 			logx.Audit(ctx, "fail", slog.Int64("execution_id", w.ExecutionID), slog.String("status", partialStatus), slog.String("reason", state), slog.Int64("database", w.DatabaseID))
 			return &worker.Halt{Disposition: worker.DispositionDone, Message: msg, SQLState: state, Recorded: true}
 		}
@@ -446,7 +456,15 @@ func (e *Executor) revalidate(ctx context.Context, w Work) error {
 	if blocked {
 		return haltFail("blocked", "Masih ada eksekusi yang belum selesai pada database ini")
 	}
-	if w.Kind == KindRollback {
+	if w.RevertsPartial() {
+		// Revert batch committed: hanya mungkin untuk mode batch, dan migration-nya tidak pernah aktif.
+		if w.ExecMode != ModeBatch {
+			return haltFail("invalid", "Hanya eksekusi batch yang dapat di-revert dari status partial")
+		}
+		if w.Irreversible {
+			return haltFail("irreversible", "Migration ini ditandai tidak dapat di-rollback")
+		}
+	} else if w.Kind == KindRollback {
 		top, err := e.repo.TopVersion(ctx, w.DatabaseID)
 		if err != nil {
 			return err
@@ -478,7 +496,9 @@ func (e *Executor) revalidate(ctx context.Context, w Work) error {
 	return nil
 }
 
-func (e *Executor) succeed(ctx context.Context, w Work, job queue.Job, sqlText string) error {
+func (e *Executor) succeed(ctx context.Context, w Work, job queue.Job, sqlText string) (result error) {
+	ctx, span := historySpan(ctx, w, "success")
+	defer func() { endHistorySpan(span, result) }()
 	version := int32(0)
 	if w.Kind == KindRollback {
 		if w.Version != nil {
@@ -507,6 +527,8 @@ func (e *Executor) succeed(ctx context.Context, w Work, job queue.Job, sqlText s
 }
 
 func (e *Executor) fail(ctx context.Context, w Work, job queue.Job, code, message, sqlText string) error {
+	ctx, span := historySpan(ctx, w, StatusFailed)
+	defer span.End()
 	_ = e.repo.MarkFailedCode(ctx, w.ExecutionID, code, message)
 	_ = e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", code, message, sqlText)
 	logx.Audit(ctx, "fail", slog.Int64("execution_id", w.ExecutionID), slog.String("reason", code), slog.Int64("database", w.DatabaseID))
@@ -514,6 +536,8 @@ func (e *Executor) fail(ctx context.Context, w Work, job queue.Job, code, messag
 }
 
 func (e *Executor) uncertain(ctx context.Context, w Work, job queue.Job, message string) error {
+	ctx, span := historySpan(ctx, w, StatusUncertain)
+	defer span.End()
 	_ = e.repo.MarkUncertain(ctx, w.ExecutionID, message)
 	_ = e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "uncertain", "uncertain", message, "")
 	return &worker.Halt{Disposition: worker.DispositionUncertain, Message: message, Recorded: true}
@@ -661,3 +685,39 @@ func uncertainErr(err error) bool {
 
 // Pastikan Executor tetap memenuhi Runner.
 var _ worker.Runner = (*Executor)(nil)
+
+// historySpan membuka span untuk pencatatan hasil execution di database platform (status, attempt, rantai).
+func historySpan(ctx context.Context, w Work, status string) (context.Context, trace.Span) {
+	return telemetry.Tracer().Start(ctx, "platform.update_history", trace.WithAttributes(
+		attribute.Int64("execution_id", w.ExecutionID), attribute.String("status", status)))
+}
+
+// endHistorySpan menandai span error hanya bila pencatatan platform gagal dan akan dicoba lagi;
+// Halt sukses adalah hasil normal, bukan error.
+func endHistorySpan(span trace.Span, result error) {
+	var halt *worker.Halt
+	if errors.As(result, &halt) && halt.Disposition == worker.DispositionRetry {
+		telemetry.End(span, result)
+		return
+	}
+	span.End()
+}
+
+// logTxOutcome mencatat commit atau rollback transaction target secara terpisah dari log SQL,
+// sama seperti event commit/rollback per batch di mode batch.
+func logTxOutcome(ctx context.Context, w Work, job queue.Job, runErr error) {
+	attrs := []any{"execution_id", w.ExecutionID, "migration_id", w.MigrationID, "kind", w.Kind, "attempt", job.Attempts, "database", w.DatabaseID}
+	switch {
+	case runErr == nil:
+		slog.InfoContext(ctx, "commit", append(attrs, "status", "ok")...)
+	case uncertainErr(runErr):
+		slog.WarnContext(ctx, "commit", append(attrs, "status", "uncertain", "err", logx.RedactString(runErr.Error()))...)
+	default:
+		var pgErr *pgconn.PgError
+		state := ""
+		if errors.As(runErr, &pgErr) {
+			state = pgErr.Code
+		}
+		slog.WarnContext(ctx, "rollback", append(attrs, "status", "error", "sqlstate", state, "err", logx.RedactString(runErr.Error()))...)
+	}
+}

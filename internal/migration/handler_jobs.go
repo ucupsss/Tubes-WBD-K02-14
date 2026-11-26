@@ -8,6 +8,8 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Enqueue menjawab POST /api/executions/{execID}/enqueue dengan 202 dan job_id.
@@ -33,7 +35,14 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request, resume bool) {
 	if resume {
 		fn = h.svc.Resume
 	}
-	jobID, err := fn(r.Context(), p, execID, traceCarrier(r.Context()))
+	// Span queue.enqueue menjadi induk job.process di worker: trace context disuntikkan dari dalamnya.
+	ctx, span := telemetry.Tracer().Start(r.Context(), "queue.enqueue", trace.WithAttributes(
+		attribute.Int64("execution_id", execID), attribute.Bool("resume", resume)))
+	jobID, err := fn(ctx, p, execID, traceCarrier(ctx))
+	if err == nil {
+		span.SetAttributes(attribute.Int64("job_id", jobID))
+	}
+	telemetry.End(span, err)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return

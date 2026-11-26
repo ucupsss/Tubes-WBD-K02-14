@@ -186,6 +186,11 @@ func (r *PgRepo) DeleteDraft(ctx context.Context, db platformdb.DBTX, databaseID
 	return nil
 }
 
+// revertedPartial bernilai benar untuk execution e yang berhenti partial lalu batch committed-nya
+// sudah dibatalkan oleh rollback sukses. Execution seperti itu tidak lagi terbuka dan tidak menahan database.
+const revertedPartial = `(e.status = 'partial' AND EXISTS (
+	SELECT 1 FROM executions rv WHERE rv.rolls_back_execution_id = e.id AND rv.status = 'success'))`
+
 // LockHead mengunci baris migration dan mengembalikan data untuk aturan submit/forward/rollback.
 func (r *PgRepo) LockHead(ctx context.Context, db platformdb.DBTX, databaseID, id int64) (Migration, head, error) {
 	m, err := scanMigration(db.QueryRow(ctx, `
@@ -210,11 +215,30 @@ func (r *PgRepo) LockHead(ctx context.Context, db platformdb.DBTX, databaseID, i
 	if top > 0 {
 		h.Top = &top
 	}
+	var partialID *int64
+	err = db.QueryRow(ctx, `
+		SELECT e.id, e.revision_id, r.irreversible
+		FROM executions e
+		JOIN migration_revisions r ON r.id = e.revision_id
+		WHERE e.migration_id = $1 AND e.kind IN ('apply', 'forward') AND e.status = 'partial'
+		  AND NOT `+revertedPartial+`
+		ORDER BY e.id DESC
+		LIMIT 1`, id).Scan(&partialID, &h.PartialRevisionID, &h.PartialIrreversible)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return Migration{}, head{}, fmt.Errorf("migration.LockHead partial: %w", err)
+	}
+	h.PartialID = partialID
 	if err := db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM executions
-			WHERE migration_id = $1 AND status = ANY($2))`, id, openStatuses()).Scan(&h.Open); err != nil {
+		SELECT
+			EXISTS (SELECT 1 FROM executions e WHERE e.migration_id = $1 AND e.status = ANY($2) AND NOT `+revertedPartial+`),
+			EXISTS (SELECT 1 FROM executions e WHERE e.migration_id = $1 AND e.status = ANY($2) AND NOT `+revertedPartial+`
+			        AND e.id <> COALESCE($3, 0))`,
+		id, openStatuses(), partialID).Scan(&h.Open, &h.OpenOther); err != nil {
 		return Migration{}, head{}, fmt.Errorf("migration.LockHead open: %w", err)
+	}
+	if err := db.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM executions WHERE migration_id = $1)`, id).Scan(&h.HasExecutions); err != nil {
+		return Migration{}, head{}, fmt.Errorf("migration.LockHead executions: %w", err)
 	}
 	if err := db.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM executions WHERE migration_id = $1 AND status = 'failed')`, id).Scan(&h.HasFailed); err != nil {

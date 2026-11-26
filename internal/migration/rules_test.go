@@ -142,3 +142,25 @@ func TestHiddenByRollback_SpecExample(t *testing.T) {
 		}
 	}
 }
+
+func TestHead_CanRollbackRevertsPartialBatch(t *testing.T) {
+	t.Parallel()
+	partial := int64(7)
+	tests := []struct {
+		name string
+		h    head
+		want error
+	}{
+		{"partial tanpa execution lain boleh di-revert", head{Frozen: true, Open: true, PartialID: &partial}, nil},
+		{"revert yang sedang diajukan menahan permintaan kedua", head{Frozen: true, Open: true, OpenOther: true, PartialID: &partial}, ErrBlocked},
+		{"revisi irreversible menolak revert", head{Frozen: true, Open: true, PartialID: &partial, PartialIrreversible: true}, ErrIrreversible},
+		{"tanpa partial dan tidak aktif tetap ditolak", head{Frozen: true}, ErrNotActive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.h.canRollback(); got != tt.want {
+				t.Fatalf("canRollback() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

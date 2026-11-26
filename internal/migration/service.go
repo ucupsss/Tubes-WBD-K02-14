@@ -99,7 +99,7 @@ func (s *Service) Delete(ctx context.Context, databaseID, id int64) error {
 	return s.inTx(ctx, func(q platformdb.DBTX) error {
 		if _, h, err := s.repo.LockHead(ctx, q, databaseID, id); err != nil {
 			return err
-		} else if h.Frozen || h.HasFailed || h.HasRolledBack || h.ActiveSuccess || h.Open {
+		} else if h.Frozen || h.HasExecutions || h.HasFailed || h.HasRolledBack || h.ActiveSuccess || h.Open {
 			return ErrNotDeletable
 		}
 		return s.repo.DeleteDraft(ctx, q, databaseID, id)
@@ -159,7 +159,11 @@ func (s *Service) open(ctx context.Context, p authz.Principal, databaseID, id in
 			RequestedBy:   p.UserID,
 			ApprovalRound: 1,
 		}
-		if kind == KindRollback {
+		if kind == KindRollback && h.PartialID != nil {
+			// Revert batch committed: down SQL dari revisi yang benar-benar dijalankan execution partial.
+			e.RollsBackExecutionID = h.PartialID
+			e.RevisionID = h.PartialRevisionID
+		} else if kind == KindRollback {
 			target, revisionID, err := s.repo.ActiveSuccessID(ctx, q, id)
 			if err != nil {
 				return err

@@ -198,19 +198,42 @@ func (r *PgRepo) SetCancelled(ctx context.Context, db platformdb.DBTX, execID in
 	return nil
 }
 
-// BlocksDatabase melaporkan ada execution lain yang menahan database (D38).
+// BlocksDatabase melaporkan ada execution lain yang menahan database (D38). Execution partial yang
+// sedang dibatalkan oleh exceptID sendiri tidak dihitung, begitu pula partial yang sudah di-revert sukses.
 func (r *PgRepo) BlocksDatabase(ctx context.Context, db platformdb.DBTX, databaseID, exceptID int64) (bool, error) {
 	var blocked bool
 	err := db.QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM executions
-			WHERE database_id = $1 AND id <> $2
-			  AND status IN ('running', 'partial', 'partially_reverted', 'uncertain'))`,
+			SELECT 1 FROM executions e
+			WHERE e.database_id = $1 AND e.id <> $2
+			  AND e.id <> COALESCE((SELECT rolls_back_execution_id FROM executions WHERE id = $2), 0)
+			  AND e.status IN ('running', 'partial', 'partially_reverted', 'uncertain')
+			  AND NOT `+revertedPartial+`)`,
 		databaseID, exceptID).Scan(&blocked)
 	if err != nil {
 		return false, fmt.Errorf("migration.BlocksDatabase: %w", err)
 	}
 	return blocked, nil
+}
+
+// RevertsPartial: rollback ini membatalkan batch committed dari execution yang berhenti partial,
+// bukan migration aktif di rantai. Posisi rantai tidak berubah karena migration itu belum pernah aktif.
+func (w Work) RevertsPartial() bool {
+	return w.Kind == KindRollback && w.SourceStatus != nil && *w.SourceStatus == StatusPartial
+}
+
+// HasActiveRevert melaporkan ada rollback yang sudah atau sedang membatalkan execution partial ini.
+// Rollback yang ditolak, dibatalkan, atau gagal tanpa mengubah apa pun tidak dihitung.
+func (r *PgRepo) HasActiveRevert(ctx context.Context, db platformdb.DBTX, execID int64) (bool, error) {
+	var found bool
+	err := db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM executions
+			WHERE rolls_back_execution_id = $1 AND status NOT IN ('rejected', 'cancelled', 'failed'))`, execID).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("migration.HasActiveRevert: %w", err)
+	}
+	return found, nil
 }
 
 // Work adalah execution beserta revisi yang benar-benar akan dijalankan.
@@ -224,15 +247,17 @@ type Work struct {
 	ApprovalRound        int
 	RequestedBy          int64
 	RollsBackExecutionID *int64
-	Version              *int32
-	UpSQL                string
-	DownSQL              *string
-	SQLHash              string
-	ExecMode             string
-	Irreversible         bool
-	BatchTable           *string
-	BatchColumn          *string
-	BatchSize            *int
+	// SourceStatus adalah status execution yang dibatalkan (hanya untuk rollback).
+	SourceStatus *string
+	Version      *int32
+	UpSQL        string
+	DownSQL      *string
+	SQLHash      string
+	ExecMode     string
+	Irreversible bool
+	BatchTable   *string
+	BatchColumn  *string
+	BatchSize    *int
 }
 
 // LoadWork membaca execution dan revisi yang dikunci padanya.
@@ -243,14 +268,15 @@ func (r *PgRepo) LoadWork(ctx context.Context, execID int64) (Work, error) {
 	var w Work
 	err := r.db.QueryRow(ctx, `
 		SELECT e.id, e.database_id, e.migration_id, e.revision_id, e.kind, e.status, e.approval_round,
-		       e.requested_by, e.rolls_back_execution_id, m.version, r.up_sql, r.down_sql, r.sql_hash, r.exec_mode, r.irreversible,
+		       e.requested_by, e.rolls_back_execution_id, src.status, m.version, r.up_sql, r.down_sql, r.sql_hash, r.exec_mode, r.irreversible,
 		       r.batch_table, r.batch_column, r.batch_size
 		FROM executions e
 		JOIN migration_revisions r ON r.id = e.revision_id
 		JOIN migrations m ON m.id = e.migration_id
+		LEFT JOIN executions src ON src.id = e.rolls_back_execution_id
 		WHERE e.id = $1`, execID).Scan(
 		&w.ExecutionID, &w.DatabaseID, &w.MigrationID, &w.RevisionID, &w.Kind, &w.Status, &w.ApprovalRound,
-		&w.RequestedBy, &w.RollsBackExecutionID, &w.Version, &w.UpSQL, &w.DownSQL, &w.SQLHash, &w.ExecMode, &w.Irreversible,
+		&w.RequestedBy, &w.RollsBackExecutionID, &w.SourceStatus, &w.Version, &w.UpSQL, &w.DownSQL, &w.SQLHash, &w.ExecMode, &w.Irreversible,
 		&w.BatchTable, &w.BatchColumn, &w.BatchSize,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -286,7 +312,7 @@ func (r *PgRepo) MarkApplied(ctx context.Context, w Work, version int32) error {
 				RETURNING id
 			)
 			UPDATE executions
-			SET status = 'success', finished_at = now(), version_applied = $4,
+			SET status = 'success', finished_at = now(), version_applied = NULLIF($4, 0),
 			    error_code = NULL, error_message = NULL
 			WHERE id = $1 AND EXISTS (SELECT 1 FROM chain)`
 	}
