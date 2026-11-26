@@ -100,7 +100,7 @@ Password koneksi target di seed hanya untuk demo lokal.
 | D32 | Semua attempt (sukses, gagal, retry) tercatat di `execution_attempts` dengan salinan SQL yang benar-benar dijalankan, SQLSTATE, waktu, dan `trace_id`, serta di log aplikasi. Catatan tidak pernah ditimpa. Rollback menyimpan `rolls_back_execution_id`. |
 | D33 | Filter **Hide rollback** di riwayat eksekusi menyembunyikan pasangan `(execution yang dibatalkan, rollback sukses yang membatalkannya)` berdasarkan **Execution ID** (`rolls_back_execution_id`), bukan nama migration. Eksekusi gagal dan rollback gagal selalu tetap tampil. Filter hanya mengubah tampilan dan tidak menghapus data. |
 | D34 | Lock per database di tabel `database_locks` dengan lease 30 detik yang diperpanjang tiap 10 detik. Satu database hanya menjalankan satu execution; database berbeda boleh paralel. Lock dipegang sepanjang semua batch. Lease yang kedaluwarsa boleh diambil alih worker lain hanya setelah memeriksa bukti eksekusi (D37). |
-| D35 | Retry otomatis hanya untuk kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`), paling banyak 3 attempt dengan jeda 5 lalu 15 detik. Kesalahan SQL lain langsung gagal. Retry tidak membuka ronde approval baru. |
+| D35 | Retry otomatis hanya untuk kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`, serta `55P03` lock timeout, mis. karena transaksi yatim worker yang mati masih memegang lock), paling banyak 3 attempt dengan jeda 5 lalu 15 detik. Kesalahan SQL lain langsung gagal. Retry tidak membuka ronde approval baru. |
 | D36 | **Resume dan revert batch**: resume melanjutkan Execution ID yang sama dari checkpoint terakhir di `_dbmp.batch_checkpoints` tanpa mengulang batch yang sudah committed dan memakai approval yang sudah ada. Rollback pada eksekusi batch yang sudah committed (atau `partial`) menjalankan SQL down per batch yang sudah committed dalam **urutan terbalik** (`batch_no` terbesar ke terkecil). Bila revert gagal di tengah, status menjadi `partially_reverted` dan dapat di-resume dengan aturan yang sama. |
 | D37 | **Bukti eksekusi** disimpan di database target dalam transaction yang sama dengan perubahan: `_dbmp.executions` (mode biasa) dan `_dbmp.batch_checkpoints` (mode batch). Tabel `execution_batches` di database platform merupakan cermin untuk tampilan UI. |
 | D38 | Selama sebuah database punya execution `running`, `partial`, `partially_reverted`, atau `uncertain`, execution lain di database itu tidak boleh mulai. Pengecualiannya resume execution itu sendiri dan revert batch yang membatalkannya; partial yang sudah di-revert sukses tidak lagi menahan. |
@@ -306,21 +306,21 @@ Sebelum SQL dijalankan, worker memeriksa lagi: status masih menunggu, hash SQL s
 
 Mode normal menjalankan SQL up atau down di satu transaction target bersama bukti `_dbmp.executions` dan `_dbmp.applied_migrations`. Commit platform hanya dilakukan setelah commit target. Bila hasil commit tidak dapat dipastikan, status menjadi `uncertain`, kunci tetap dipegang, dan job diperiksa lagi nanti: ada bukti berarti sudah commit, tidak ada bukti dan koneksi sehat berarti aman diulang, koneksi mati tetap `uncertain`.
 
-Kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`) dicoba lagi paling banyak 3 kali, dengan jeda 5 detik lalu 15 detik. Kesalahan SQL lain membuat job `dead`. Mode batch dijalankan oleh `internal/batch` melalui `migration.Executor`. Status untuk polling ada di `GET /api/jobs/{id}`.
+Kegagalan sementara (SQLSTATE kelas `08`, `40001`, `40P01`, `57P01`, `53300`, `55P03`) dicoba lagi paling banyak 3 kali, dengan jeda 5 detik lalu 15 detik. Kesalahan SQL lain membuat job `dead`. Mode batch dijalankan oleh `internal/batch` melalui `migration.Executor`. Status untuk polling ada di `GET /api/jobs/{id}`.
 
 ### Pemulihan lock saat worker gagal
 
 Lock, job, dan checkpoint semuanya tersimpan di database (platform dan target), jadi tidak ada keadaan yang hanya hidup di memori worker. Bila worker mati di tengah eksekusi:
 
 1. **Heartbeat berhenti.** Worker pemegang memperpanjang `database_locks.lease_expires_at` tiap 10 detik. Setelah worker mati, lease habis paling lama 30 detik kemudian. Selama lease masih berlaku, worker lain mendapat `ErrBusy` dan job-nya dikembalikan ke antrean.
-2. **Job diklaim ulang.** Job berstatus `running` yang `claimed_at`-nya lebih tua dari 30 detik dianggap ditinggalkan, sehingga `Claim` boleh mengambilnya lagi dengan `FOR UPDATE SKIP LOCKED`. Nomor attempt tidak bertambah karena belum ada attempt baru yang dimulai.
+2. **Job diklaim ulang.** Selama worker hidup, heartbeat yang sama juga menyegarkan `migration_jobs.claimed_at` tiap 10 detik, sehingga eksekusi yang lama (mis. batch besar) tidak dianggap ditinggalkan. Setelah worker mati, job berstatus `running` yang `claimed_at`-nya lebih tua dari 30 detik dianggap ditinggalkan, sehingga `Claim` boleh mengambilnya lagi dengan `FOR UPDATE SKIP LOCKED`. Nomor attempt tidak bertambah karena belum ada attempt baru yang dimulai.
 3. **Lock diambil alih.** `Acquire` hanya menimpa baris `database_locks` yang lease-nya sudah habis (atau milik worker dan execution yang sama), jadi dua worker tidak pernah memegang database yang sama.
 4. **Bukti diperiksa sebelum apa pun diulang** (D37). Execution yang masih `running` atau `uncertain` tidak langsung dijalankan ulang:
    - Ada baris `_dbmp.executions` untuk execution itu di target → perubahan sudah commit; worker hanya mencatat sukses di platform.
-   - Tidak ada bukti dan koneksi sehat → transaction lama pasti batal; aman dijalankan ulang. Mode batch melanjutkan dari `_dbmp.batch_checkpoints` sehingga batch yang sudah commit tidak diulang.
+   - Tidak ada bukti dan koneksi sehat → transaction lama tidak commit, jadi aman dijalankan ulang. Transaction lama bisa saja masih berjalan sebentar sebagai transaksi yatim (Postgres baru membatalkannya saat statement-nya selesai) dan memegang lock; attempt ulang lalu kena `lock_timeout` (`55P03`) dan dicoba lagi dengan jeda 5 lalu 15 detik sampai lock lepas (D35). Mode batch melanjutkan dari `_dbmp.batch_checkpoints` sehingga batch yang sudah commit tidak diulang.
    - Bukti tidak dapat diperiksa (target tidak terjangkau) → status `uncertain`, lock tetap ditahan, dan job dicek lagi nanti. Selama itu execution lain di database tersebut tertahan (D38).
 
-Skenario ini diuji oleh `TestClaim_StaleRunningJobCanBeTakenOver`, `TestLock_OneDatabaseAtATimeAndExpiredTakeover`, `TestExecute_UncertainKeepsLock`, dan `TestIter4_QueuedProofReconcilesWithoutRerunningDDL`.
+Skenario ini diuji oleh `TestClaim_StaleRunningJobCanBeTakenOver`, `TestClaim_TouchedLongRunningJobIsNotReclaimed`, `TestLock_OneDatabaseAtATimeAndExpiredTakeover`, `TestExecute_UncertainKeepsLock`, dan `TestIter4_QueuedProofReconcilesWithoutRerunningDDL`.
 
 ## Dataset besar
 
