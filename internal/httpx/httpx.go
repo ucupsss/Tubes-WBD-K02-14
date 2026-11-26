@@ -9,6 +9,7 @@ import (
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/view"
 )
 
@@ -59,7 +60,7 @@ func HandleError(w http.ResponseWriter, r *http.Request, v *view.View, err error
 		slog.Error("request error",
 			"err", err,
 			"method", r.Method,
-			"path", r.URL.Path,
+			"path", logx.Safe(r.URL.Path),
 			"user_id", userID(r),
 		)
 	}

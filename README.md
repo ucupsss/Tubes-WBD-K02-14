@@ -481,11 +481,18 @@ Batasan: `nextval()` pada sequence tidak ikut di-rollback, dan `EXPLAIN ANALYZE`
 
 Workflow `.github/workflows/codeql.yml` menjalankan CodeQL (suite `security-extended`) untuk Go dan JavaScript/TypeScript setiap push ke `main`, `feat/**`, `fix/**`, setiap pull request ke `main`, seminggu sekali, dan bisa dijalankan manual. Go dianalisis dengan `autobuild`, frontend tanpa build. Hasilnya muncul di tab **Security → Code scanning** repository (gratis karena repository publik).
 
-Triase temuan:
+Scan pertama (commit `085e369`, CodeQL 2.27.6) memeriksa 35 rule Go dan 103 rule JavaScript/TypeScript. Frontend tidak punya temuan. Go punya 6 temuan, semuanya rule `go/log-injection` (severity medium): nilai dari request ditulis ke log.
 
-| Rule | Severity | Lokasi | Dampak | Keputusan |
-|------|----------|--------|--------|-----------|
-| _diisi setelah scan pertama_ | | | | |
+| # | Lokasi | Nilai dari user | Dampak | Keputusan |
+|---|--------|-----------------|--------|-----------|
+| 1 | `internal/httpx/middleware.go` (log `http.request`) | `r.URL.Path` | Path berisi newline atau karakter kontrol dapat mencoba memalsukan baris log; path sangat panjang memperbesar log. Log ditulis `slog` JSON yang sudah meng-escape karakter kontrol, jadi pemalsuan baris tidak terjadi pada konfigurasi sekarang. | **Diperbaiki**: nilai dilewatkan `logx.Safe` (buang `\n`, `\r`, dan karakter kontrol lain, potong 256 karakter). |
+| 6 | `internal/httpx/middleware.go` (log `panic`) | `r.URL.Path` | Sama dengan #1. | **Diperbaiki** dengan `logx.Safe`. |
+| 4 | `internal/httpx/httpx.go` (log `request error`) | `r.URL.Path` | Sama dengan #1. | **Diperbaiki** dengan `logx.Safe`. |
+| 5 | `internal/httpx/json.go` (log `request error`) | `r.URL.Path` | Sama dengan #1. | **Diperbaiki** dengan `logx.Safe`. |
+| 2 | `internal/api/auth.go` (log `auth.login_failed`) | `username` dari body login | Username bebas diisi penyerang tanpa login, jadi paling mudah dipakai untuk mengotori log. | **Diperbaiki** dengan `logx.Safe`. Password tetap tidak pernah di-log. |
+| 3 | `internal/explain/handler.go` (log `migration.explained`) | `analyze` dari body request | Nilainya `bool` hasil decode JSON, sehingga hanya bisa `true` atau `false` dan tidak bisa membawa teks. | **False positive**, alert di-dismiss dengan alasan tersebut. |
+
+Perbaikan diuji oleh `TestSafe_RemovesControlCharactersAndTruncates` (newline, `\r`, tab, NUL, escape ANSI dibuang; potongan tetap UTF-8 valid). Workflow memakai `actions/checkout@v5`, `actions/setup-go@v6`, dan `github/codeql-action@v4` (runtime Node.js 24) setelah scan pertama memberi peringatan bahwa Node.js 20 dan CodeQL Action v3 akan dihentikan.
 
 ## Struktur
 
@@ -533,4 +540,4 @@ Status bonus:
 | M2: pengumpulan super cepat | Tidak diambil. |
 | M2: observability | Dikerjakan: log dan trace dikumpulkan lewat OpenTelemetry Collector ke Loki dan Tempo dengan korelasi dua arah di Grafana, ditambah endpoint metrik Prometheus (server dan worker) dan dashboard Grafana ter-provision untuk job, retry, waktu tunggu queue dan lock, durasi migration, batch, dan pool koneksi (bagian Metrik Prometheus dan Dashboard Grafana). |
 | M2: stress test k6 | Dikerjakan: baca naik lalu turun (beban normal 5 VU sampai 200), plus job yang sudah di-approve di dua database. Hasil dan analisis di bagian Stress test k6. |
-| M2: SAST CodeQL | Workflow dipasang; triase temuan di bagian SAST CodeQL. |
+| M2: SAST CodeQL | Dikerjakan: workflow CodeQL untuk Go dan TypeScript, 6 temuan ditriase (5 diperbaiki, 1 false positive) di bagian SAST CodeQL. |
