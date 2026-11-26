@@ -25,7 +25,7 @@ make web-build    # membangun SPA ke web/dist (di-embed ke binary Go)
 make run          # API di http://localhost:8080
 make worker       # proses terpisah yang mengambil job migration
 make seed         # user, group, koneksi, dan grant untuk demo
-make k6           # stress test API baca; butuh k6 dan server yang sudah jalan
+make k6           # stress test baca + job; butuh k6, server, dan worker
 ```
 
 Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-dev` di terminal lain, lalu buka `http://localhost:5173` (Vite meneruskan `/api` ke server Go, jadi tidak perlu CORS).
@@ -38,7 +38,7 @@ Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-
 | `make db-reset`         | Menghapus volume lalu menyalakan ulang dari kosong                        |
 | `make obs-up` / `make obs-down` | Menyalakan / mematikan stack Observability (OTel Collector, Tempo, Loki, Grafana) |
 | `make worker`       | Worker antrian migration, proses terpisah dari API                        |
-| `make k6`           | Stress test k6 pada API baca. Butuh [k6](https://grafana.com/docs/k6/) di PATH |
+| `make k6`           | Stress test k6: API baca dan job migration. Butuh [k6](https://grafana.com/docs/k6/), server, dan worker |
 | `make web-check`        | Frontend: type-check, unit test, dan build                                |
 | `make test`             | Unit test                                                                 |
 | `make test-integration` | Unit test + integration test (butuh `make up` dan `TEST_DATABASE_URL`)    |
@@ -343,38 +343,60 @@ Pengukuran pada AMD Ryzen 7 7435HS (8 core / 16 thread), RAM 15,7 GB, Postgres 1
 
 ## Stress test k6
 
-Skrip `load/k6/api.js` menaikkan lalu menurunkan beban pada API baca. Tiap VU masuk sebagai `alice` sekali (`GET /api/csrf` lalu `POST /api/auth/login`), kemudian berulang membaca `GET /api/me`, daftar database, daftar migration, dan riwayat execution `target-db-1`. Jeda antar putaran 1 detik. Enqueue dan eksekusi SQL tidak ikut, supaya pengukuran tidak mengisi riwayat dan tidak berebut kunci database. Worker tidak perlu jalan.
+Beban normal tim adalah **5 VU**. Skrip `load/k6/api.js` menaikkan beban baca ke 80 lalu 200 VU, kemudian menurunkannya lewat 80 kembali ke 5. Tiap tingkat naik 15 detik dan bertahan 45 detik. Jeda antar putaran baca 0,2 detik. Setiap VU masuk sebagai `alice` sekali, lalu membaca `GET /api/me`, daftar migration, dan riwayat execution.
+
+Bersamaan dengan itu, tiap tingkat mengirim job yang sudah di-approve. Sebelum tingkat dimulai, setup membuat 8 execution di `target-db-1` dan 8 di `target-db-2` (judul berawalan `k6`, SQL `SELECT pg_sleep(0.2)`, down `SELECT 1`), mengajukannya, lalu menyetujuinya sebagai `alice` (leader `dev`) dan `carol` (leader `analyst`). Jalur `serialized` mengantrekan kedelapan job db1 sekaligus lalu mem-poll `GET /api/jobs/{id}` sampai `done` atau `dead`. Jalur `parallel` melakukan hal yang sama di db2, bertumpukan dengan db1. Jawaban 202 hanya berarti job diterima. Job dihitung sukses hanya bila `execution_status` hasil polling adalah `success`.
+
+Setup juga menjadikan `alice` dan `carol` leader, memberi group `dev` akses edit ke kedua database, dan menolak lanjut jika `POST /api/admin/databases/{id}/test` gagal. Port 5434 sering bentrok dengan Postgres bawaan Windows, jadi `target-db-2` dicek dulu. Butuh `K6_ADMIN_PASSWORD` (user default `admin`).
 
 Pasang k6 di Windows dengan `winget install --id GrafanaLabs.k6`. Atau lewat Docker, dari akar repo:
 
 ```bash
-docker run --rm -v "$(pwd)/load/k6:/scripts" -e BASE_URL=http://host.docker.internal:8080 grafana/k6 run /scripts/api.js
+docker run --rm -v "$(pwd)/load/k6:/scripts" -e BASE_URL=http://host.docker.internal:8080 -e K6_ADMIN_PASSWORD grafana/k6 run /scripts/api.js
 ```
 
-Jalankan setelah `make up`, `make seed`, dan `make run`:
+Jalankan `make up`, `make seed`, `make run`, dan `make worker`, lalu:
 
 ```bash
 make k6
 ```
 
-`BASE_URL` default `http://localhost:8080`. Lima tingkat berjalan berurutan. Masing-masing naik ke target dalam 15 detik, lalu bertahan 45 detik.
+`BASE_URL` default `http://localhost:8080`. Ambang lulus, untuk seluruh jalan dan tiap tingkat: error rate di bawah 1%, dan p95 request baca di bawah 1 detik. p50 dicatat, bukan ambang.
 
-- `5-up`, lalu `15-up`, lalu `30-up`
-- turun ke `15-down`, lalu `5-down`
+Pengukuran pada mesin yang sama dengan dataset (AMD Ryzen 7 7435HS, 8 core / 16 thread, RAM 15,7 GB), server Go, worker (konkurensi 2), dan Postgres 16 di mesin lokal:
 
-Ambang lulus, untuk seluruh jalan dan untuk tiap tingkat: error rate di bawah 1%, dan p95 request baca di bawah 1 detik.
+| Tingkat | VU | Request baca | req/s | p50 baca | p95 baca | Error rate |
+|---------|----|--------------|-------|----------|----------|------------|
+| 5-up | 5 | 3.465 | 57,75 | 6,39 ms | 10,76 ms | 0% |
+| 80-up | 80 | 51.269 | 854,48 | 13,27 ms | 29,16 ms | 0% |
+| 200-up | 200 | 55.763 | 929,38 | 133,09 ms | 187,98 ms | 0% |
+| 80-down | 80 | 48.831 | 813,85 | 15,22 ms | 47,87 ms | 0% |
+| 5-down | 5 | 3.471 | 57,85 | 7,05 ms | 10,03 ms | 0% |
 
-Pengukuran pada mesin yang sama dengan dataset (AMD Ryzen 7 7435HS, 8 core / 16 thread, RAM 15,7 GB), server Go dan Postgres 16 di mesin lokal:
+p50 baca seluruh jalan 18,94 ms, p95 164,88 ms, error rate 0%. Semua tingkat lulus ambang.
 
-| Tingkat | VU | Request | p95 baca | Error rate |
-|---------|----|---------|----------|------------|
-| 5-up | 5 | 770 | 7,11 ms | 0% |
-| 15-up | 15 | 2.349 | 7,28 ms | 0% |
-| 30-up | 30 | 4.695 | 7,16 ms | 0% |
-| 15-down | 15 | 2.339 | 7,12 ms | 0% |
-| 5-down | 5 | 764 | 7,51 ms | 0% |
+| Tingkat | Jalur | p50 tunggu antrian | p50 durasi job | Selesai / menit | Gagal |
+|---------|-------|--------------------|----------------|-----------------|-------|
+| 5-up | serialized (db1) | 1.480 ms | 4.735 ms | 8 | 0 |
+| 5-up | parallel (db2) | 1.494 ms | 1.839 ms | 8 | 0 |
+| 80-up | serialized (db1) | 1.711 ms | 2.070 ms | 8 | 0 |
+| 80-up | parallel (db2) | 1.711 ms | 2.079 ms | 8 | 0 |
+| 200-up | serialized (db1) | 1.271 ms | 1.681 ms | 8 | 0 |
+| 200-up | parallel (db2) | 1.266 ms | 1.688 ms | 8 | 0 |
+| 80-down | serialized (db1) | 1.015 ms | 1.468 ms | 8 | 0 |
+| 80-down | parallel (db2) | 1.015 ms | 1.382 ms | 8 | 0 |
+| 5-down | serialized (db1) | 1.620 ms | 1.992 ms | 8 | 0 |
+| 5-down | parallel (db2) | 1.615 ms | 1.991 ms | 8 | 0 |
 
-p95 baca seluruh jalan 7,18 ms, error rate 0%. Semua tingkat lulus ambang.
+Delapan job per jalur adalah seluruh kiriman tingkat itu, jadi "selesai / menit" sama dengan jumlah job, bukan batas worker.
+
+Pada 5 VU API baca masih longgar: p95 10,76 ms pada 58 req/s. Job db1 pada tingkat pertama lebih lama selesai (p50 4,7 detik) daripada db2 (1,8 detik). Keduanya tetap `success`.
+
+Pada 80 VU throughput baca naik ke 854 req/s dan p95 ke 29 ms. Error tetap 0%. Tunggu antrian dan durasi job kedua database hampir sama (sekitar 1,7 detik dan 2,1 detik). Worker konkurensi 2 menjalankan satu job dari tiap database bersamaan, jadi antrean db2 tidak menambah tunggu db1. Di dalam satu database, delapan `pg_sleep(0.2)` tetap berurutan karena kunci per database.
+
+Pada 200 VU p50 baca meloncat ke 133 ms dan p95 ke 188 ms, sementara throughput hanya naik dari 854 ke 929 req/s. Di sinilah API mulai jenuh: pengguna bertambah, tetapi server tidak menghasilkan request lebih banyak secara berarti, dan latensi naik. Tetap di bawah ambang 1 detik dan tanpa error. Job tidak ikut melambat; p50 durasinya justru sekitar 1,7 detik di kedua jalur. Penyebab lonjakan baca ada di server HTTP dan pool koneksi platform, bukan di kunci migration.
+
+Saat beban turun ke 80 VU, p95 baca pulih ke 47,87 ms dan req/s kembali ke 814. Pada 5 VU akhir, p50 7,05 ms dan p95 10,03 ms, sejajar dengan tingkat normal di awal. Error tetap 0% di setiap tingkat. Pemulihan terbaca dari latensi, bukan dari error.
 
 ## Analisis EXPLAIN
 
@@ -449,5 +471,5 @@ Status bonus:
 | M1: MySQL/MariaDB, schema diff, migration generation | Tidak dikerjakan. Untuk MySQL/MariaDB, DDL melakukan implicit commit sehingga jaminan rollback migration tidak bisa dipenuhi. |
 | M2: pengumpulan super cepat | Tidak diambil. |
 | M2: observability | Sebagian: log dan trace dikumpulkan lewat OpenTelemetry Collector ke Loki dan Tempo dengan korelasi dua arah di Grafana. Endpoint metrik Prometheus dan dashboard Grafana untuk metrik queue/pool belum ada. |
-| M2: stress test k6 | Sebagian: skrip menguji API baca bertahap naik lalu turun. Pengiriman job migration bersamaan belum termasuk. |
+| M2: stress test k6 | Dikerjakan: baca naik lalu turun (beban normal 5 VU sampai 200), plus job yang sudah di-approve di dua database. Hasil dan analisis di bagian Stress test k6. |
 | M2: SAST CodeQL | Belum. |
