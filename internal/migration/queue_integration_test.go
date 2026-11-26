@@ -46,6 +46,84 @@ func TestEnqueue_DuplicateIsOneJobAndSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestLatestJobID_FilledAfterEnqueue(t *testing.T) {
+	fx := newFixture(t, "edit")
+	m := create(t, fx, "JobID", "SELECT 1", "SELECT 1", false, "")
+	exec := submit(t, fx, m.ID)
+
+	before, err := fx.srv.Service.LatestJobID(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != nil {
+		t.Fatalf("job_id sebelum enqueue = %d, seharusnya nil", *before)
+	}
+
+	setExecStatus(t, fx, exec.ID, migration.StatusApproved)
+	jobID, err := fx.srv.Service.Enqueue(context.Background(), fx.editor, exec.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := fx.srv.Service.LatestJobID(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == nil || *after != jobID {
+		t.Fatalf("job_id setelah enqueue = %v, seharusnya %d", after, jobID)
+	}
+}
+
+func TestInsertAttempt_DuplicateNumberKeepsHistory(t *testing.T) {
+	fx := newFixture(t, "edit")
+	m := create(t, fx, "Riwayat", "SELECT 1", "SELECT 1", false, "")
+	exec := submit(t, fx, m.ID)
+	repo := migration.NewPgRepo().Bind(fx.platform)
+	ctx := context.Background()
+
+	// Job yang diklaim ulang setelah worker mati memakai nomor attempt yang sama.
+	if err := repo.InsertAttempt(ctx, exec.ID, 1, "worker-lama", "failed", "55P03", "lock sibuk", "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.InsertAttempt(ctx, exec.ID, 1, "worker-baru", "success", "", "", "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := fx.platform.Query(ctx, `
+		SELECT attempt_no, worker_id, status, COALESCE(sqlstate, '')
+		FROM execution_attempts WHERE execution_id = $1 ORDER BY attempt_no`, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type attempt struct {
+		no                       int
+		worker, status, sqlstate string
+	}
+	var got []attempt
+	for rows.Next() {
+		var a attempt
+		if err := rows.Scan(&a.no, &a.worker, &a.status, &a.sqlstate); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, a)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []attempt{
+		{1, "worker-lama", "failed", "55P03"},
+		{2, "worker-baru", "success", ""},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("attempts = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("attempt[%d] = %+v, want %+v (riwayat tidak boleh ditimpa)", i, got[i], want[i])
+		}
+	}
+}
+
 func TestCancel_QueuedJobIsNotClaimed(t *testing.T) {
 	fx := newFixture(t, "edit")
 	m := create(t, fx, "Batal", "SELECT 1", "SELECT 1", false, "")

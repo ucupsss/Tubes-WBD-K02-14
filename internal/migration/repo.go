@@ -484,7 +484,7 @@ func scanExecution(row rowScanner) (Execution, error) {
 // LatestJobID mengembalikan ID job terbaru untuk execution, atau nil bila belum pernah di-enqueue.
 func (r *PgRepo) LatestJobID(ctx context.Context, db platformdb.DBTX, execID int64) (*int64, error) {
 	var id int64
-	err := db.QueryRow(ctx, `SELECT id FROM jobs WHERE execution_id = $1 ORDER BY id DESC LIMIT 1`, execID).Scan(&id)
+	err := db.QueryRow(ctx, `SELECT id FROM migration_jobs WHERE execution_id = $1 ORDER BY id DESC LIMIT 1`, execID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
