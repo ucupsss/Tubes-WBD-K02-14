@@ -157,3 +157,20 @@ func TestPg_UnavailableTarget(t *testing.T) {
 		t.Fatalf("target mati: err = %v, want KindUnavailable (502)", err)
 	}
 }
+
+func TestPg_InternalSchemasRejected(t *testing.T) {
+	svc, dbID := setup(t)
+	ctx := context.Background()
+	for _, pair := range [][2]string{
+		{"pg_catalog", "pg_class"},
+		{"information_schema", "tables"},
+		{"_dbmp", "applied_migrations"},
+	} {
+		if _, err := svc.GetTableMetadata(ctx, dbID, pair[0], pair[1]); !errors.Is(err, explorer.ErrTableNotFound) {
+			t.Fatalf("metadata %s.%s: err = %v, want ErrTableNotFound", pair[0], pair[1], err)
+		}
+		if _, err := svc.GetTableData(ctx, dbID, pair[0], pair[1], 1, 10); !errors.Is(err, explorer.ErrTableNotFound) {
+			t.Fatalf("data %s.%s: err = %v, want ErrTableNotFound", pair[0], pair[1], err)
+		}
+	}
+}

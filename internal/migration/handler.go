@@ -240,12 +240,14 @@ func (h *Handler) ShowExecution(w http.ResponseWriter, r *http.Request) {
 	if h.authz != nil {
 		canEdit, _ = h.authz.Can(r.Context(), p, authz.ActMigrationRun, e.DatabaseID)
 	}
+	jobID, _ := h.svc.LatestJobID(r.Context(), id)
 	execObj := executionJSON(e)
 	body := executionJSON(e)
 	body["execution"] = execObj
 	body["approvals"] = approvalJSON(approvals)
 	body["attempts"] = attemptJSON(attempts)
 	body["batches"] = batches
+	body["job_id"] = jobID
 	body["can_edit"] = canEdit
 	httpx.WriteJSON(w, http.StatusOK, body)
 }
@@ -307,7 +309,12 @@ func revisionJSON(r Revision) map[string]any {
 func executionJSON(e Execution) map[string]any {
 	return map[string]any{
 		"id": e.ID, "database_id": e.DatabaseID, "migration_id": e.MigrationID,
-		"migration_title": e.MigrationTitle, "revision_id": e.RevisionID, "kind": e.Kind,
+		"migration_title": e.MigrationTitle, "revision_id": e.RevisionID,
+		"revision_no": e.RevisionNo, "up_sql": e.UpSQL, "down_sql": e.DownSQL,
+		"irreversible": e.Irreversible, "irreversible_reason": e.IrreversibleReason,
+		"exec_mode": e.ExecMode, "is_top_of_chain": e.IsTopOfChain,
+		"is_rolled_back": e.IsRolledBack, "has_active_revert": e.HasActiveRevert,
+		"kind":   e.Kind,
 		"status": e.Status, "requested_by": e.RequestedBy, "requested_by_username": e.RequestedByUsername,
 		"rolls_back_execution_id": e.RollsBackExecutionID, "approval_round": e.ApprovalRound,
 		"version_applied": e.VersionApplied, "batches_committed": e.BatchesCommitted,

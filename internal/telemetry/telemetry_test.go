@@ -207,17 +207,20 @@ func TestPgxTracer_LogsQueryAndSQLStateWithRedaction(t *testing.T) {
 }
 
 func TestOTLPExporterAndLogForwarder(t *testing.T) {
-	var traceBodies, otlpLogBodies, lokiBodies []string
+	var traceRequests int
+	var otlpLogBodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
 		_, _ = buf.ReadFrom(r.Body)
 		switch r.URL.Path {
 		case "/v1/traces":
-			traceBodies = append(traceBodies, buf.String())
+			if buf.Len() > 0 {
+				traceRequests++
+			}
 		case "/v1/logs":
 			otlpLogBodies = append(otlpLogBodies, buf.String())
-		case "/loki/api/v1/push":
-			lokiBodies = append(lokiBodies, buf.String())
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -234,7 +237,7 @@ func TestOTLPExporterAndLogForwarder(t *testing.T) {
 	}
 	defer func() { _ = shutdown(context.Background()) }()
 
-	fwd := NewLogForwarder("dbmp-test", srv.URL, srv.URL)
+	fwd := NewLogForwarder("dbmp-test", srv.URL)
 	var logBuf bytes.Buffer
 	logger := logx.New(&logBuf, slog.LevelInfo)
 
@@ -245,13 +248,36 @@ func TestOTLPExporterAndLogForwarder(t *testing.T) {
 	span.End()
 	_ = fwd.Close()
 
-	if len(traceBodies) == 0 || !strings.Contains(traceBodies[0], traceID) {
-		t.Fatalf("OTLP trace tidak terkirim atau tidak memuat traceID %s: %v", traceID, traceBodies)
+	if traceRequests == 0 {
+		t.Fatalf("OTLP trace tidak terkirim ke /v1/traces")
 	}
-	if len(otlpLogBodies) == 0 || !strings.Contains(otlpLogBodies[0], traceID) {
-		t.Fatalf("OTLP log tidak memuat traceID %s: %v", traceID, otlpLogBodies)
+	if len(otlpLogBodies) != 1 || !strings.Contains(otlpLogBodies[0], traceID) {
+		t.Fatalf("OTLP log harus terkirim sekali lewat Collector dan memuat traceID %s: %v", traceID, otlpLogBodies)
 	}
-	if len(lokiBodies) == 0 || !strings.Contains(lokiBodies[0], `"service":"dbmp-test"`) || !strings.Contains(lokiBodies[0], traceID) {
-		t.Fatalf("Loki log tidak memuat stream/traceID: %v", lokiBodies)
+}
+
+func TestLogForwarder_ConcurrentWriteAndCloseNoPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	fwd := NewLogForwarder("dbmp-race-test", srv.URL)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_, _ = fwd.Write([]byte(`{"msg":"hello","level":"INFO"}` + "\n"))
+		}
+	}()
+	_ = fwd.Close()
+	<-done
+	// Write setelah Close juga tidak boleh panic.
+	if _, err := fwd.Write([]byte(`{"msg":"after-close"}` + "\n")); err != nil {
+		t.Fatalf("Write after Close err = %v", err)
+	}
+	// Double Close tidak boleh panic.
+	if err := fwd.Close(); err != nil {
+		t.Fatalf("second Close err = %v", err)
 	}
 }

@@ -81,11 +81,13 @@ type PaginationInput struct {
 }
 
 // ParsePagination mengurai nilai page dan size dari query string.
-// Default: page = 1, size = 50. Max size = 200. Min size = 1.
+// Default: page = 1, size = 50. Max size = 200. Min size = 1. Max page = 1_000_000 (cegah overflow OFFSET).
 func ParsePagination(pageStr, sizeStr string) PaginationInput {
 	page, err := strconv.Atoi(pageStr)
 	if err != nil || page < 1 {
 		page = 1
+	} else if page > 1_000_000 {
+		page = 1_000_000
 	}
 
 	size, err := strconv.Atoi(sizeStr)

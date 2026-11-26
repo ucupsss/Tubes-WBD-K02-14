@@ -220,6 +220,14 @@ func (s *Service) GetExecution(ctx context.Context, id int64) (Execution, []Atte
 	return e, attempts, nil
 }
 
+// LatestJobID mengembalikan ID job terbaru untuk execution, atau nil bila belum ada.
+func (s *Service) LatestJobID(ctx context.Context, executionID int64) (*int64, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	return s.repo.LatestJobID(ctx, s.pool, executionID)
+}
+
 // ListBatches membaca daftar checkpoint batch yang dicerminkan di database platform.
 func (s *Service) ListBatches(ctx context.Context, executionID int64) ([]batch.Checkpoint, error) {
 	if s.pool == nil {

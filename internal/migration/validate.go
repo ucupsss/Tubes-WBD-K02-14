@@ -67,7 +67,7 @@ func (in Input) Validate() error {
 		fields["down_sql"] = msg
 	}
 	if in.ExecMode == ModeBatch {
-		if !validIdent(in.BatchTable) {
+		if !validTableIdent(in.BatchTable) {
 			fields["batch_table"] = "Nama tabel batch tidak valid"
 		}
 		if !validIdent(in.BatchColumn) {
@@ -159,6 +159,13 @@ func validIdent(s string) bool {
 		}
 	}
 	return true
+}
+
+func validTableIdent(s string) bool {
+	if schema, table, ok := strings.Cut(s, "."); ok {
+		return validIdent(schema) && validIdent(table)
+	}
+	return validIdent(s)
 }
 
 func sqlProblem(sqlText string) string {

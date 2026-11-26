@@ -71,6 +71,9 @@ func (r *fakeRepo) Missing(context.Context, platformdb.DBTX, int64, int64, int) 
 	}
 	return m, nil
 }
+func (r *fakeRepo) GrantGroupCount(context.Context, platformdb.DBTX, int64) (int, error) {
+	return len(r.rows), nil
+}
 func (r *fakeRepo) ListByExecution(context.Context, platformdb.DBTX, int64) ([]approval.Approval, error) {
 	return nil, nil
 }

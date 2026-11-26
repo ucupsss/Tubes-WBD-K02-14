@@ -110,8 +110,9 @@ func (t *pgxTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.Tra
 		attribute.Int64("db.rows_affected", rows),
 	)
 	if data.Err != nil {
-		state.span.RecordError(data.Err)
-		state.span.SetStatus(codes.Error, logx.RedactString(data.Err.Error()))
+		redacted := logx.RedactString(data.Err.Error())
+		state.span.RecordError(errors.New(redacted))
+		state.span.SetStatus(codes.Error, redacted)
 		var pgErr *pgconn.PgError
 		if errors.As(data.Err, &pgErr) {
 			state.span.SetAttributes(attribute.String("db.sqlstate", pgErr.Code))
@@ -177,8 +178,9 @@ func (t *pgxTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, data pgx.Tra
 	}
 	state.span.SetAttributes(attribute.Int64("db.duration_ms", time.Since(state.start).Milliseconds()))
 	if data.Err != nil {
-		state.span.RecordError(data.Err)
-		state.span.SetStatus(codes.Error, logx.RedactString(data.Err.Error()))
+		redacted := logx.RedactString(data.Err.Error())
+		state.span.RecordError(errors.New(redacted))
+		state.span.SetStatus(codes.Error, redacted)
 	}
 	state.span.End()
 }

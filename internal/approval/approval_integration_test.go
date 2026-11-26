@@ -291,3 +291,21 @@ func TestApproval_InboxHidesFinishedExecutions(t *testing.T) {
 		t.Fatalf("execution yang sudah ditolak masih di inbox alice: %+v", items)
 	}
 }
+
+func TestApproval_VerifyFailsWhenAllGrantsRevoked(t *testing.T) {
+	e := setup(t)
+	e.open(t, 1)
+	_, _ = e.decide(t, e.alice, true)
+	_, _ = e.decide(t, e.bob, true)
+
+	if _, err := e.pool.Exec(context.Background(), `DELETE FROM group_db_access WHERE database_id = $1`, e.dbID); err != nil {
+		t.Fatal(err)
+	}
+	v, err := e.svc.Verify(context.Background(), e.pool, e.execID, e.dbID, 1)
+	if err != nil {
+		t.Fatalf("Verify err = %v", err)
+	}
+	if v.Complete {
+		t.Fatalf("Verify harus mengembalikan Complete=false ketika 0 group punya grant")
+	}
+}

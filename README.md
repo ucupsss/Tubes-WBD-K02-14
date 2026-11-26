@@ -256,14 +256,22 @@ Untuk menjalankan backend penerima trace dan log beserta korelasi dua arahnya di
 ```bash
 make obs-up
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-export LOKI_PUSH_URL=http://localhost:3100
 make run     # terminal 1
 make worker  # terminal 2
 ```
 
-- **OpenTelemetry Collector** (`:4317` gRPC, `:4318` HTTP) menerima span OTLP dari API server dan worker lalu meneruskannya ke **Grafana Tempo** (`:3200`), serta menerima log OTLP dan meneruskannya ke **Grafana Loki** (`:3100`).
-- **Pembatasan kardinalitas label**: label stream di Loki dibatasi hanya pada `service` (`dbmp-server` / `dbmp-worker`) dan `level` (`INFO` / `WARN` / `ERROR`). Nilai dengan kardinalitas tinggi seperti `user_id`, `job_id`, `execution_id`, `trace_id`, atau teks `SQL` disimpan di dalam body JSON log, bukan sebagai label indeks.
-- **Korelasi Log ↔ Trace di Grafana** (`http://localhost:3000`): datasource Loki telah dikonfigurasi dengan *Derived Field* `TraceID` (`"trace_id":"([a-f0-9]{32})"`) yang menautkan langsung baris log ke tampilan waterfall span di Tempo, dan datasource Tempo memiliki *Traces to Logs* yang memfilter log di Loki berdasarkan `trace_id` yang sama.
+- **Satu jalur melalui OpenTelemetry Collector** (`:4317` gRPC, `:4318` HTTP): API server (`dbmp-server`) dan worker (`dbmp-worker`) mengirim trace memakai exporter resmi `otlptracehttp` (`/v1/traces`) dan log JSON terstruktur lewat OTLP/HTTP (`/v1/logs`) ke Collector. Collector meneruskan trace ke **Grafana Tempo** (`:3200`) dan log ke **Grafana Loki** (`:3100/otlp`) sehingga tidak ada log ganda dan seluruh telemetri melalui Collector.
+- **Pembatasan kardinalitas label**: satu-satunya indexed label stream di Loki adalah `service_name` (`dbmp-server` / `dbmp-worker`). Nilai dengan kardinalitas tinggi seperti `user_id`, `job_id`, `execution_id`, `trace_id`, atau teks `SQL` disimpan di dalam body JSON / structured metadata, bukan sebagai label indeks.
+- **Korelasi Log ↔ Trace di Grafana** (`http://localhost:3000`): datasource Loki dikonfigurasi dengan *Derived Field* `TraceID` (`"trace_id":"([a-f0-9]{32})"`) yang menautkan langsung baris log ke waterfall span di Tempo, dan datasource Tempo memiliki *Traces to Logs* (`{service_name=~".+"} |= "$${__span.traceId}"`) yang memfilter log di Loki berdasarkan `trace_id` yang sama.
+
+Contoh hasil nyata korelasi log dan trace di Grafana untuk trace `f67d7621283a197d3397d678aef116bb` (satu alur penuh `POST /api/executions/1/enqueue` hingga worker selesai):
+
+1. **Log di Loki dengan tautan ke trace Tempo (`Lihat Trace di Tempo`)**:
+   ![Loki log dengan derived field TraceID menuju Tempo](docs/img/grafana-loki-log-to-trace.png)
+2. **Waterfall trace di Tempo dari API server (`POST /api/executions/1/enqueue` → `queue.enqueue`) sampai worker (`job.process` → `revalidate`, `lock.acquire`, `target.exec`, `platform.update_history`, `db.query`)**:
+   ![Tempo trace waterfall dari enqueue hingga worker](docs/img/grafana-tempo-trace-waterfall.png)
+3. **Korelasi Trace → Logs (split view Tempo | Loki dengan query `{service_name=~".+"} |= "f67d7621283a197d3397d678aef116bb"`)**:
+   ![Grafana split view Tempo dan Loki berkorelasi](docs/img/grafana-trace-to-logs-split.png)
 
 ## Mode Eksekusi per Batch (`internal/batch`)
 

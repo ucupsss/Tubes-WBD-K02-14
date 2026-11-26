@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
@@ -49,7 +50,12 @@ func (h *Handler) Explain(w http.ResponseWriter, r *http.Request) {
 	ctx := logx.WithDatabase(r.Context(), strconv.FormatInt(dbID, 10))
 
 	var req explainRequest
-	if r.ContentLength > 0 {
+	if r.Body != nil && r.ContentLength != 0 && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+	} else if r.ContentLength > 0 {
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.WriteError(w, r, err)
 			return

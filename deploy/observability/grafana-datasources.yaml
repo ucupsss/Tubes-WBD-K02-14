@@ -28,4 +28,4 @@ datasources:
         filterByTraceID: true
         filterBySpanID: false
         customQuery: true
-        query: '{service=~".+"} |= "$${__span.traceId}"'
+        query: '{service_name=~".+"} |= "$${__span.traceId}"'

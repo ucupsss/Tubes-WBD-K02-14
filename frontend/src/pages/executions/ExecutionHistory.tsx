@@ -66,8 +66,9 @@ export function ExecutionHistoryPage() {
   const id = Number(dbID)
   // Default awal: checkbox TIDAK dicentang (tampilkan semua) sesuai panduan 7.1.
   const [hideRollback, setHideRollback] = useState(false)
+  const [page, setPage] = useState(1)
   const schemaQuery = useDatabaseSchema(id)
-  const execQuery = useDatabaseExecutions(id, hideRollback)
+  const execQuery = useDatabaseExecutions(id, hideRollback, page)
 
   const dbName = schemaQuery.data?.database.name ?? `Database #${id}`
   const canEdit = schemaQuery.data?.database.level === 'edit'
@@ -86,9 +87,9 @@ export function ExecutionHistoryPage() {
             <Link className="btn btn-ghost" to={`/db/${id}`}>
               Katalog Skema
             </Link>
-            <a className="btn btn-ghost" href={`/db/${id}/migrations`}>
+            <Link className="btn btn-ghost" to={`/db/${id}/migrations`}>
               Daftar Migration
-            </a>
+            </Link>
           </div>
         }
       />
@@ -99,7 +100,10 @@ export function ExecutionHistoryPage() {
             <input
               type="checkbox"
               checked={hideRollback}
-              onChange={e => setHideRollback(e.target.checked)}
+              onChange={e => {
+                setHideRollback(e.target.checked)
+                setPage(1)
+              }}
             />
             <span>
               <strong>Hide rollback</strong> — Sembunyikan pasangan eksekusi yang telah di-rollback sukses beserta
@@ -117,7 +121,8 @@ export function ExecutionHistoryPage() {
       </div>
 
       <QueryState query={execQuery}>
-        {({ items }) => {
+        {({ items, total, page: currentPage, page_size: pageSize }) => {
+          const totalPages = Math.max(1, Math.ceil((total ?? items.length) / (pageSize || 50)))
           // Hitung execution teratas pada rantai aktif bila backend tidak mengirim field is_top_of_chain secara eksplisit.
           const rolledBackIds = new Set<number>()
           for (const e of items) {
@@ -143,37 +148,63 @@ export function ExecutionHistoryPage() {
               </p>
             </div>
           ) : (
-            <TableWrap>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Exec ID</th>
-                    <th>Versi</th>
-                    <th>Migration & Revisi</th>
-                    <th>Jenis</th>
-                    <th>Status</th>
-                    <th>Progress Batch</th>
-                    <th>Pengaju & Waktu</th>
-                    <th>
-                      <span className="sr-only">Aksi</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map(item => (
-                    <ExecutionRow
-                      key={item.id}
-                      dbId={id}
-                      item={item}
-                      canEdit={canEdit}
-                      isTopActive={item.is_top_of_chain ?? item.id === topActiveExecId}
-                      isRolledBack={rolledBackIds.has(item.id)}
-                      hideRollback={hideRollback}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </TableWrap>
+            <>
+              <TableWrap>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Exec ID</th>
+                      <th>Versi</th>
+                      <th>Migration & Revisi</th>
+                      <th>Jenis</th>
+                      <th>Status</th>
+                      <th>Progress Batch</th>
+                      <th>Pengaju & Waktu</th>
+                      <th>
+                        <span className="sr-only">Aksi</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map(item => (
+                      <ExecutionRow
+                        key={item.id}
+                        dbId={id}
+                        item={item}
+                        canEdit={canEdit}
+                        isTopActive={item.is_top_of_chain ?? item.id === topActiveExecId}
+                        isRolledBack={item.is_rolled_back ?? rolledBackIds.has(item.id)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
+              {totalPages > 1 && (
+                <div className="form-actions" style={{ justifyContent: 'space-between', marginTop: 12 }}>
+                  <span className="muted small">
+                    Halaman {currentPage ?? page} dari {totalPages} (total {total} eksekusi)
+                  </span>
+                  <div className="form-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={page <= 1}
+                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                    >
+                      ← Sebelumnya
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={page >= totalPages}
+                      onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                    >
+                      Berikutnya →
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
           )
         }}
       </QueryState>
@@ -187,19 +218,17 @@ function ExecutionRow({
   canEdit,
   isTopActive,
   isRolledBack,
-  hideRollback,
 }: {
   dbId: number
   item: ExecutionItem
   canEdit: boolean
   isTopActive: boolean
   isRolledBack: boolean
-  hideRollback: boolean
 }) {
   const flash = useFlash()
   const navigate = useNavigate()
   const submit = useSubmit()
-  const inv = [keys.executions(dbId, hideRollback), keys.execution(item.id)]
+  const inv = [keys.executionsAll(dbId), keys.migrations(dbId), keys.execution(item.id), keys.approvals]
 
   const enqueueAct = useAction<void, AsyncJobCreated>(() => api.post<AsyncJobCreated>(`/api/executions/${item.id}/enqueue`, {}), inv)
   const resumeAct = useAction<void, AsyncJobCreated>(() => api.post<AsyncJobCreated>(`/api/executions/${item.id}/resume`, {}), inv)
@@ -260,7 +289,9 @@ function ExecutionRow({
     canEdit &&
     ((item.status === 'failed' && (item.kind === 'apply' || item.kind === 'forward')) || isRolledBack)
 
-  const canResume = canEdit && (item.status === 'partial' || item.status === 'partially_reverted')
+  const canResume =
+    canEdit &&
+    ((item.status === 'partial' && !item.has_active_revert) || item.status === 'partially_reverted')
 
   return (
     <tr>

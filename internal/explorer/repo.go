@@ -90,6 +90,7 @@ func (r *PgRepo) ListTables(ctx context.Context, pool *pgxpool.Pool) ([]TableSum
 }
 
 // TableExists memeriksa keberadaan tabel pada skema target di katalog PostgreSQL.
+// Schema internal (pg_catalog, information_schema, _dbmp) selalu dikecualikan sesuai D19.
 func (r *PgRepo) TableExists(ctx context.Context, pool *pgxpool.Pool, schema, table string) (bool, error) {
 	var exists bool
 	err := r.withReadOnlyTx(ctx, pool, func(tx pgx.Tx) error {
@@ -98,6 +99,7 @@ func (r *PgRepo) TableExists(ctx context.Context, pool *pgxpool.Pool, schema, ta
 				SELECT 1
 				FROM information_schema.tables
 				WHERE table_schema = $1 AND table_name = $2
+				  AND table_schema NOT IN ('pg_catalog', 'information_schema', '_dbmp')
 			)`
 		return tx.QueryRow(ctx, q, schema, table).Scan(&exists)
 	})

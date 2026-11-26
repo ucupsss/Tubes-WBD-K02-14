@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/db"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
@@ -24,7 +27,8 @@ func main() {
 	logger := logx.New(logOut, slog.LevelInfo)
 	slog.SetDefault(logger)
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	shutdownTelemetry, err := telemetry.Init(ctx, telemetry.Config{
 		ServiceName: "dbmp-server",
 		Disabled:    os.Getenv("OTEL_TRACES_EXPORTER") == "none",
@@ -33,7 +37,11 @@ func main() {
 		logger.Error("telemetry init", "err", err)
 		os.Exit(1)
 	}
-	defer func() { _ = shutdownTelemetry(ctx) }()
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutCtx)
+	}()
 	if err := platformdb.Migrate(cfg.PlatformDatabaseURL, db.PlatformMigrations); err != nil {
 		logger.Error("platform migrate", "err", err)
 		os.Exit(1)
@@ -57,8 +65,23 @@ func main() {
 	}
 	defer a.Conns.CloseAll()
 
+	srv := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           a.Handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			logger.Error("server shutdown", "err", err)
+		}
+	}()
+
 	logger.Info("server started", "addr", cfg.Addr)
-	if err := http.ListenAndServe(cfg.Addr, a.Handler); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

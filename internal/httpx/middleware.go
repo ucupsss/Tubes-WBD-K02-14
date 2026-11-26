@@ -43,7 +43,17 @@ func Recover(logger *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					logger.Error("panic", "err", rec, "method", r.Method, "path", r.URL.Path)
+					logger.ErrorContext(r.Context(), "panic", "err", rec, "method", r.Method, "path", r.URL.Path)
+					if IsAPI(r) {
+						WriteJSON(w, http.StatusInternalServerError, ErrorBody{
+							Error: ErrorDetail{
+								Code:    "internal",
+								Message: "Terjadi kesalahan pada server",
+								Details: map[string]any{},
+							},
+						})
+						return
+					}
 					http.Error(w, "Terjadi kesalahan pada server", http.StatusInternalServerError)
 				}
 			}()

@@ -60,6 +60,9 @@ func replaceAttr(_ []string, a slog.Attr) slog.Attr {
 		return slog.String(a.Key, Redacted)
 	}
 	if a.Value.Kind() == slog.KindString {
+		if a.Key == "query" {
+			return slog.String(a.Key, Truncate(redactNoTruncate(a.Value.String()), 2000))
+		}
 		return slog.String(a.Key, RedactString(a.Value.String()))
 	}
 	if a.Value.Kind() == slog.KindAny {
@@ -83,17 +86,20 @@ func IsSensitiveKey(key string) bool {
 
 // kvSecretPattern menangkap pasangan rahasia gaya libpq/konfigurasi, mis. "password=abc" atau
 // "token: 'abc'", termasuk di dalam pesan error bebas.
-var kvSecretPattern = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|token|api_key)(\s*[=:]\s*)('[^']*'|"[^"]*"|[^\s,;&]+)`)
+var kvSecretPattern = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|token|api_key|session|cookie|csrf|dsn|authorization)(\s*[=:]\s*)('[^']*'|"[^"]*"|[^\s,;&]+)`)
 
-// RedactString menyamarkan DSN (user:password@host) serta pasangan rahasia key=value, lalu memotong
-// string yang terlalu panjang.
-func RedactString(s string) string {
+func redactNoTruncate(s string) string {
 	s = dsnPattern.ReplaceAllStringFunc(s, func(m string) string {
 		scheme := m[:strings.Index(m, "://")+3]
 		return scheme + Redacted
 	})
-	s = kvSecretPattern.ReplaceAllString(s, "${1}${2}"+Redacted)
-	return Truncate(s, MaxValueLen)
+	return kvSecretPattern.ReplaceAllString(s, "${1}${2}"+Redacted)
+}
+
+// RedactString menyamarkan DSN (user:password@host) serta pasangan rahasia key=value, lalu memotong
+// string yang terlalu panjang.
+func RedactString(s string) string {
+	return Truncate(redactNoTruncate(s), MaxValueLen)
 }
 
 // Truncate memotong s menjadi paling banyak n karakter (rune), diberi tanda … bila terpotong.

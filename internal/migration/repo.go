@@ -340,6 +340,7 @@ func (r *PgRepo) ListExecutions(ctx context.Context, db platformdb.DBTX, databas
 		SELECT `+executionCols+`
 		FROM executions e
 		JOIN migrations m ON m.id = e.migration_id
+		JOIN migration_revisions r ON r.id = e.revision_id
 		JOIN users u ON u.id = e.requested_by
 		`+filter+`
 		ORDER BY e.id
@@ -361,6 +362,7 @@ func (r *PgRepo) GetExecution(ctx context.Context, db platformdb.DBTX, id int64)
 		SELECT `+executionCols+`
 		FROM executions e
 		JOIN migrations m ON m.id = e.migration_id
+		JOIN migration_revisions r ON r.id = e.revision_id
 		JOIN users u ON u.id = e.requested_by
 		WHERE e.id = $1`, id)
 	e, err := scanExecution(row)
@@ -403,7 +405,7 @@ func (r *PgRepo) ListAttempts(ctx context.Context, db platformdb.DBTX, execution
 // Get, SetStatus, dan SetRound memenuhi approval.Executions.
 func (r *PgRepo) Get(ctx context.Context, db platformdb.DBTX, execID int64) (approval.ExecInfo, error) {
 	var info approval.ExecInfo
-	err := db.QueryRow(ctx, `SELECT database_id, approval_round, status FROM executions WHERE id = $1`, execID).
+	err := db.QueryRow(ctx, `SELECT database_id, approval_round, status FROM executions WHERE id = $1 FOR UPDATE`, execID).
 		Scan(&info.DatabaseID, &info.Round, &info.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return approval.ExecInfo{}, ErrExecNotFound
@@ -439,7 +441,14 @@ func (r *PgRepo) SetRound(ctx context.Context, db platformdb.DBTX, execID int64,
 }
 
 const executionCols = `
-	e.id, e.database_id, e.migration_id, m.title, e.revision_id, e.kind, e.status,
+	e.id, e.database_id, e.migration_id, m.title, e.revision_id,
+	r.revision_no, r.up_sql, r.down_sql, r.irreversible, r.irreversible_reason, r.exec_mode,
+	(e.kind IN ('apply', 'forward') AND e.status = 'success' AND m.version IS NOT NULL
+	 AND m.version = (SELECT MAX(m2.version) FROM migrations m2 WHERE m2.database_id = e.database_id)
+	 AND NOT EXISTS (SELECT 1 FROM executions rb WHERE rb.rolls_back_execution_id = e.id AND rb.status = 'success')),
+	EXISTS (SELECT 1 FROM executions rb WHERE rb.rolls_back_execution_id = e.id AND rb.status = 'success'),
+	EXISTS (SELECT 1 FROM executions rb WHERE rb.rolls_back_execution_id = e.id AND rb.status NOT IN ('rejected', 'cancelled', 'failed')),
+	e.kind, e.status,
 	e.requested_by, u.username, e.rolls_back_execution_id, e.approval_round, e.version_applied,
 	e.batches_committed, e.rows_committed, e.created_at, e.started_at, e.finished_at, e.error_code, e.error_message`
 
@@ -462,11 +471,27 @@ func scanMigration(row rowScanner) (Migration, error) {
 func scanExecution(row rowScanner) (Execution, error) {
 	var e Execution
 	err := row.Scan(
-		&e.ID, &e.DatabaseID, &e.MigrationID, &e.MigrationTitle, &e.RevisionID, &e.Kind, &e.Status,
+		&e.ID, &e.DatabaseID, &e.MigrationID, &e.MigrationTitle, &e.RevisionID,
+		&e.RevisionNo, &e.UpSQL, &e.DownSQL, &e.Irreversible, &e.IrreversibleReason, &e.ExecMode,
+		&e.IsTopOfChain, &e.IsRolledBack, &e.HasActiveRevert,
+		&e.Kind, &e.Status,
 		&e.RequestedBy, &e.RequestedByUsername, &e.RollsBackExecutionID, &e.ApprovalRound, &e.VersionApplied,
 		&e.BatchesCommitted, &e.RowsCommitted, &e.CreatedAt, &e.StartedAt, &e.FinishedAt, &e.ErrorCode, &e.ErrorMessage,
 	)
 	return e, err
+}
+
+// LatestJobID mengembalikan ID job terbaru untuk execution, atau nil bila belum pernah di-enqueue.
+func (r *PgRepo) LatestJobID(ctx context.Context, db platformdb.DBTX, execID int64) (*int64, error) {
+	var id int64
+	err := db.QueryRow(ctx, `SELECT id FROM jobs WHERE execution_id = $1 ORDER BY id DESC LIMIT 1`, execID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("migration.LatestJobID: %w", err)
+	}
+	return &id, nil
 }
 
 func scanExecutions(rows pgx.Rows) ([]Execution, error) {

@@ -21,6 +21,8 @@ type Repo interface {
 	Counts(ctx context.Context, q platformdb.DBTX, execID int64, round int) (pending, rejected int, err error)
 	// Missing mengembalikan group yang punya akses sekarang tetapi belum punya approval sah di ronde ini.
 	Missing(ctx context.Context, q platformdb.DBTX, execID, dbID int64, round int) ([]int64, error)
+	// GrantGroupCount mengembalikan jumlah group yang saat ini memiliki akses ke dbID.
+	GrantGroupCount(ctx context.Context, q platformdb.DBTX, dbID int64) (int, error)
 	// ListByExecution mengembalikan semua baris approval (semua ronde) untuk halaman detail.
 	ListByExecution(ctx context.Context, q platformdb.DBTX, execID int64) ([]Approval, error)
 	// PendingForLeader mengembalikan antrean approval milik leader (hanya ronde terbaru tiap execution).
@@ -125,6 +127,14 @@ func (r *PgRepo) Missing(ctx context.Context, q platformdb.DBTX, execID, dbID in
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+func (r *PgRepo) GrantGroupCount(ctx context.Context, q platformdb.DBTX, dbID int64) (int, error) {
+	var n int
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM group_db_access WHERE database_id = $1`, dbID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("approval.GrantGroupCount: %w", err)
+	}
+	return n, nil
 }
 
 func (r *PgRepo) ListByExecution(ctx context.Context, q platformdb.DBTX, execID int64) ([]Approval, error) {
