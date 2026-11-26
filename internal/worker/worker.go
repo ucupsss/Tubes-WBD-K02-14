@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/metrics"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
@@ -60,6 +61,9 @@ type Halt struct {
 	Message       string
 	SQLState      string
 	Recorded      bool
+	// Reason adalah alasan singkat dari himpunan tetap untuk label metrik retry
+	// (mis. "lock_busy", "db_busy", "platform_record"). Kosong berarti "deferred".
+	Reason string
 }
 
 // Error mengembalikan pesan Halt untuk dicatat di attempt.
@@ -167,7 +171,17 @@ func Process(ctx context.Context, jobs Jobs, exec Executions, runner Runner, wor
 	}
 	slog.InfoContext(ctx, "job.claimed", "job_id", job.ID, "execution_id", job.ExecutionID, "attempt", job.Attempts, "worker_id", workerID)
 
+	if job.ClaimedAt != nil {
+		metrics.QueueWait.Observe(max(job.ClaimedAt.Sub(job.RunAfter).Seconds(), 0))
+	}
+	started := time.Now()
 	runErr := runner.Run(ctx, job)
+	outcome, reason := Outcome(runErr, job.Attempts)
+	metrics.JobsProcessed.WithLabelValues(outcome).Inc()
+	metrics.JobDuration.WithLabelValues(outcome).Observe(metrics.Since(started))
+	if outcome == OutcomeRetry {
+		metrics.JobRetries.WithLabelValues(reason).Inc()
+	}
 	var halt *Halt
 	if errors.As(runErr, &halt) {
 		return finishHalt(ctx, jobs, exec, workerID, job, halt)
@@ -212,6 +226,52 @@ func Process(ctx context.Context, jobs Jobs, exec Executions, runner Runner, wor
 	}
 	slog.InfoContext(ctx, "job.dead", "job_id", job.ID, "execution_id", job.ExecutionID, "sqlstate", sqlstate)
 	return jobs.Complete(ctx, job.ID, queue.StatusDead)
+}
+
+// Outcome metrik untuk satu job yang sudah dijalankan runner.
+const (
+	OutcomeSuccess   = "success"
+	OutcomeDone      = "done"
+	OutcomeRetry     = "retry"
+	OutcomeUncertain = "uncertain"
+	OutcomeFailed    = "failed"
+)
+
+// Outcome memetakan hasil runner ke label metrik dengan aturan yang sama seperti Process memutuskan
+// job selesai, diantre ulang, atau dead. reason hanya terisi untuk retry: SQLSTATE yang bisa di-retry,
+// Halt.Reason (mis. "lock_busy"), atau "deferred" untuk job yang ditunda tanpa alasan lain.
+func Outcome(runErr error, attempts int) (outcome, reason string) {
+	if runErr == nil {
+		return OutcomeSuccess, ""
+	}
+	var halt *Halt
+	if errors.As(runErr, &halt) {
+		switch halt.Disposition {
+		case DispositionSuccess:
+			return OutcomeSuccess, ""
+		case DispositionDone:
+			return OutcomeDone, ""
+		case DispositionUncertain:
+			return OutcomeUncertain, ""
+		case DispositionRetry:
+			if halt.Reason != "" {
+				return OutcomeRetry, halt.Reason
+			}
+			if halt.SQLState != "" && queue.Retryable(halt.SQLState) {
+				return OutcomeRetry, halt.SQLState
+			}
+			return OutcomeRetry, "deferred"
+		default:
+			return OutcomeFailed, ""
+		}
+	}
+	var sqlErr *queue.SQLError
+	if errors.As(runErr, &sqlErr) && queue.Retryable(sqlErr.SQLState) {
+		if _, again := queue.Backoff(attempts); again {
+			return OutcomeRetry, sqlErr.SQLState
+		}
+	}
+	return OutcomeFailed, ""
 }
 
 func finishHalt(ctx context.Context, jobs Jobs, exec Executions, workerID string, job queue.Job, halt *Halt) error {

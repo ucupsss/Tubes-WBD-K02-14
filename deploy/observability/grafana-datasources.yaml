@@ -29,3 +29,11 @@ datasources:
         filterBySpanID: false
         customQuery: true
         query: '{service_name=~".+"} |= "$${__span.traceId}"'
+
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    jsonData:
+      timeInterval: 15s

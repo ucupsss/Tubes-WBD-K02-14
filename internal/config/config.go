@@ -25,6 +25,9 @@ type Config struct {
 	WorkerID                string
 	WorkerConcurrency       int
 	WorkerPollInterval      time.Duration
+	// MetricsAddr adalah alamat listener /metrics server; WorkerMetricsAddr milik worker. "off" mematikannya.
+	MetricsAddr       string
+	WorkerMetricsAddr string
 }
 
 // Load reads environment variables (after an optional .env file).
@@ -45,6 +48,8 @@ func Load() (Config, error) {
 		WorkerID:                os.Getenv("WORKER_ID"),
 		WorkerConcurrency:       2,
 		WorkerPollInterval:      time.Second,
+		MetricsAddr:             getenv("METRICS_ADDR", ":9101"),
+		WorkerMetricsAddr:       getenv("WORKER_METRICS_ADDR", ":9102"),
 	}
 	if cfg.PlatformDatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: PLATFORM_DATABASE_URL wajib diisi")
