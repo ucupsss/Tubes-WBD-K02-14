@@ -50,9 +50,9 @@ export function Dashboard() {
                         <Link className="btn btn-ghost" to={`/db/${db.id}/executions`}>
                           Riwayat Eksekusi
                         </Link>
-                        <a className="btn btn-ghost" href={`/db/${db.id}/migrations`}>
+                        <Link className="btn btn-ghost" to={`/db/${db.id}/migrations`}>
                           Migrations
-                        </a>
+                        </Link>
                       </td>
                     </tr>
                   ))}

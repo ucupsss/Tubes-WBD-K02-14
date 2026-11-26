@@ -281,6 +281,8 @@ export interface ExecutionItem {
   irreversible?: boolean
   irreversible_reason?: string | null
   is_top_of_chain?: boolean
+  is_rolled_back?: boolean
+  has_active_revert?: boolean
   up_sql?: string
   down_sql?: string | null
   created_at: string

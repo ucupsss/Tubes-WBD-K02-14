@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
 import { keys, useAction, useExecutionDetail, useJobStatus } from '../../api/hooks'
@@ -21,14 +22,26 @@ import { statusBadgeTone, statusLabel } from './ExecutionHistory'
 export function ExecutionDetailPage() {
   const { execID } = useParams<{ execID: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
+  const qc = useQueryClient()
   const id = Number(execID)
   const initialJobId = Number(searchParams.get('job_id') || '0') || null
   const [activeJobId, setActiveJobId] = useState<number | null>(initialJobId)
 
-  // Polling otomatis setiap 1,5 detik selama execution sedang queued/running/uncertain.
+  useEffect(() => {
+    setActiveJobId(Number(searchParams.get('job_id') || '0') || null)
+  }, [execID, searchParams])
+
+  // Polling otomatis setiap 1,5 detik hanya selama execution sedang queued/running/uncertain.
   const detailQuery = useExecutionDetail(id, 1500)
   const currentJobId = activeJobId ?? detailQuery.data?.job_id ?? null
   const jobQuery = useJobStatus(currentJobId, 1500)
+
+  const jobStatus = jobQuery.data?.status
+  useEffect(() => {
+    if (jobStatus === 'done' || jobStatus === 'dead') {
+      void qc.invalidateQueries({ queryKey: keys.execution(id) })
+    }
+  }, [jobStatus, id, qc])
 
   return (
     <QueryState query={detailQuery}>
@@ -170,7 +183,12 @@ function ExecutionSummaryCard({
   const submit = useSubmit()
   const [comment, setComment] = useState('')
 
-  const inv = [keys.execution(exec.id), keys.executions(exec.database_id, false), keys.executions(exec.database_id, true), keys.approvals]
+  const inv = [
+    keys.execution(exec.id),
+    keys.executionsAll(exec.database_id),
+    keys.migrations(exec.database_id),
+    keys.approvals,
+  ]
 
   const approveAct = useAction<void>(() => api.post(`/api/executions/${exec.id}/approve`, { comment }), inv)
   const rejectAct = useAction<void>(() => api.post(`/api/executions/${exec.id}/reject`, { comment }), inv)
@@ -329,7 +347,7 @@ function ExecutionSummaryCard({
             </button>
           )}
 
-          {(exec.status === 'partial' || exec.status === 'partially_reverted') && (
+          {((exec.status === 'partial' && !exec.has_active_revert) || exec.status === 'partially_reverted') && (
             <button type="button" className="btn btn-primary" disabled={submit.pending} onClick={() => void handleResume()}>
               {exec.status === 'partially_reverted'
                 ? 'Resume Revert dari Checkpoint Terakhir'
@@ -337,7 +355,7 @@ function ExecutionSummaryCard({
             </button>
           )}
 
-          {exec.status === 'partial' && !exec.irreversible && (
+          {exec.status === 'partial' && !exec.has_active_revert && !exec.irreversible && (
             <ConfirmButton
               label="Revert Batch yang Sudah Committed"
               confirmLabel="Ya, Ajukan Revert"
@@ -346,22 +364,27 @@ function ExecutionSummaryCard({
             />
           )}
 
-          {exec.status === 'success' && (exec.kind === 'apply' || exec.kind === 'forward') && !exec.irreversible && (
-            <ConfirmButton
-              label="Rollback Migration Ini"
-              confirmLabel="Ya, Ajukan Rollback"
-              disabled={submit.pending}
-              onConfirm={() => void handleRollback()}
-            />
-          )}
+          {exec.status === 'success' &&
+            (exec.kind === 'apply' || exec.kind === 'forward') &&
+            exec.is_top_of_chain &&
+            !exec.is_rolled_back &&
+            !exec.irreversible && (
+              <ConfirmButton
+                label="Rollback Migration Ini"
+                confirmLabel="Ya, Ajukan Rollback"
+                disabled={submit.pending}
+                onConfirm={() => void handleRollback()}
+              />
+            )}
 
-          {(exec.status === 'failed' || (exec.kind === 'rollback' && exec.status === 'success')) && (
+          {((exec.status === 'failed' && (exec.kind === 'apply' || exec.kind === 'forward')) ||
+            (exec.kind === 'rollback' && exec.status === 'success')) && (
             <button type="button" className="btn btn-ghost" disabled={submit.pending} onClick={() => void handleForward()}>
               Forward (Jalankan Ulang Up)
             </button>
           )}
 
-          {(exec.status === 'pending_review' || exec.status === 'approved') && (
+          {(exec.status === 'approved' || exec.status === 'queued') && exec.batches_committed === 0 && (
             <ConfirmButton
               label="Batalkan Permintaan"
               confirmLabel="Ya, Batalkan"

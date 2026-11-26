@@ -53,11 +53,12 @@ func (r *PgRepo) MarkRunning(ctx context.Context, execID int64) (bool, error) {
 }
 
 // MarkQueued mengembalikan execution ke antrian setelah retry.
+// Hanya mengubah status dari running supaya status uncertain tidak tertimpa.
 func (r *PgRepo) MarkQueued(ctx context.Context, execID int64) error {
 	if err := r.needDB(); err != nil {
 		return err
 	}
-	_, err := r.db.Exec(ctx, `UPDATE executions SET status = 'queued' WHERE id = $1`, execID)
+	_, err := r.db.Exec(ctx, `UPDATE executions SET status = 'queued' WHERE id = $1 AND status = 'running'`, execID)
 	if err != nil {
 		return fmt.Errorf("migration.MarkQueued: %w", err)
 	}
@@ -120,7 +121,15 @@ func (r *PgRepo) InsertAttempt(ctx context.Context, execID int64, attemptNo int,
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO execution_attempts (
 			execution_id, attempt_no, worker_id, status, sql_executed, sqlstate, error_message, started_at, finished_at, trace_id)
-		VALUES ($1, $2, $3, $4, $7, NULLIF($5, ''), NULLIF($6, ''), now(), now(), NULLIF($8, ''))`,
+		VALUES ($1, $2, $3, $4, $7, NULLIF($5, ''), NULLIF($6, ''), now(), now(), NULLIF($8, ''))
+		ON CONFLICT (execution_id, attempt_no) DO UPDATE SET
+			worker_id = EXCLUDED.worker_id,
+			status = EXCLUDED.status,
+			sql_executed = EXCLUDED.sql_executed,
+			sqlstate = EXCLUDED.sqlstate,
+			error_message = EXCLUDED.error_message,
+			finished_at = now(),
+			trace_id = EXCLUDED.trace_id`,
 		execID, attemptNo, workerID, status, sqlstate, message, sqlText, traceID)
 	if err != nil {
 		return fmt.Errorf("migration.InsertAttempt: %w", err)
@@ -159,18 +168,18 @@ func (r *PgRepo) MarkPartial(ctx context.Context, execID int64, status, code, me
 	return nil
 }
 
-// LockExecution mengunci satu execution dan mengembalikan database serta statusnya.
-func (r *PgRepo) LockExecution(ctx context.Context, db platformdb.DBTX, execID int64) (databaseID int64, status string, requestedBy int64, err error) {
+// LockExecution mengunci satu execution dan mengembalikan database, status, peminta, serta jumlah batch committed.
+func (r *PgRepo) LockExecution(ctx context.Context, db platformdb.DBTX, execID int64) (databaseID int64, status string, requestedBy int64, batchesCommitted int, err error) {
 	err = db.QueryRow(ctx, `
-		SELECT database_id, status, requested_by FROM executions WHERE id = $1 FOR UPDATE`, execID).
-		Scan(&databaseID, &status, &requestedBy)
+		SELECT database_id, status, requested_by, batches_committed FROM executions WHERE id = $1 FOR UPDATE`, execID).
+		Scan(&databaseID, &status, &requestedBy, &batchesCommitted)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, "", 0, ErrExecNotFound
+		return 0, "", 0, 0, ErrExecNotFound
 	}
 	if err != nil {
-		return 0, "", 0, fmt.Errorf("migration.LockExecution: %w", err)
+		return 0, "", 0, 0, fmt.Errorf("migration.LockExecution: %w", err)
 	}
-	return databaseID, status, requestedBy, nil
+	return databaseID, status, requestedBy, batchesCommitted, nil
 }
 
 // SetQueued menandai execution masuk antrian.
@@ -207,13 +216,53 @@ func (r *PgRepo) BlocksDatabase(ctx context.Context, db platformdb.DBTX, databas
 			SELECT 1 FROM executions e
 			WHERE e.database_id = $1 AND e.id <> $2
 			  AND e.id <> COALESCE((SELECT rolls_back_execution_id FROM executions WHERE id = $2), 0)
-			  AND e.status IN ('running', 'partial', 'partially_reverted', 'uncertain')
+			  AND (
+			      e.status IN ('running', 'partial', 'partially_reverted', 'uncertain')
+			      OR (e.batches_committed > 0 AND e.status NOT IN ('success', 'cancelled', 'rejected'))
+			  )
 			  AND NOT `+revertedPartial+`)`,
 		databaseID, exceptID).Scan(&blocked)
 	if err != nil {
 		return false, fmt.Errorf("migration.BlocksDatabase: %w", err)
 	}
 	return blocked, nil
+}
+
+// HardBlocksDatabase melaporkan apakah ada execution lain yang secara permanen menahan database
+// (partial, partially_reverted, uncertain, atau memiliki batch committed yang belum tuntas).
+// Status 'running' dipisahkan karena eksekusi paralel dikendalikan oleh per-DB lock.
+func (r *PgRepo) HardBlocksDatabase(ctx context.Context, db platformdb.DBTX, databaseID, exceptID int64) (bool, error) {
+	var blocked bool
+	err := db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM executions e
+			WHERE e.database_id = $1 AND e.id <> $2
+			  AND e.id <> COALESCE((SELECT rolls_back_execution_id FROM executions WHERE id = $2), 0)
+			  AND (
+			      e.status IN ('partial', 'partially_reverted', 'uncertain')
+			      OR (e.batches_committed > 0 AND e.status NOT IN ('running', 'success', 'cancelled', 'rejected'))
+			  )
+			  AND NOT `+revertedPartial+`)`,
+		databaseID, exceptID).Scan(&blocked)
+	if err != nil {
+		return false, fmt.Errorf("migration.HardBlocksDatabase: %w", err)
+	}
+	return blocked, nil
+}
+
+// HasRunningExecution melaporkan apakah ada execution lain pada database ini yang sedang berstatus running.
+func (r *PgRepo) HasRunningExecution(ctx context.Context, db platformdb.DBTX, databaseID, exceptID int64) (bool, error) {
+	var running bool
+	err := db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM executions e
+			WHERE e.database_id = $1 AND e.id <> $2
+			  AND e.status = 'running')`,
+		databaseID, exceptID).Scan(&running)
+	if err != nil {
+		return false, fmt.Errorf("migration.HasRunningExecution: %w", err)
+	}
+	return running, nil
 }
 
 // RevertsPartial: rollback ini membatalkan batch committed dari execution yang berhenti partial,
@@ -248,16 +297,18 @@ type Work struct {
 	RequestedBy          int64
 	RollsBackExecutionID *int64
 	// SourceStatus adalah status execution yang dibatalkan (hanya untuk rollback).
-	SourceStatus *string
-	Version      *int32
-	UpSQL        string
-	DownSQL      *string
-	SQLHash      string
-	ExecMode     string
-	Irreversible bool
-	BatchTable   *string
-	BatchColumn  *string
-	BatchSize    *int
+	SourceStatus     *string
+	Version          *int32
+	UpSQL            string
+	DownSQL          *string
+	SQLHash          string
+	ExecMode         string
+	Irreversible     bool
+	BatchTable       *string
+	BatchColumn      *string
+	BatchSize        *int
+	BatchesCommitted int
+	RowsCommitted    int64
 }
 
 // LoadWork membaca execution dan revisi yang dikunci padanya.
@@ -269,7 +320,7 @@ func (r *PgRepo) LoadWork(ctx context.Context, execID int64) (Work, error) {
 	err := r.db.QueryRow(ctx, `
 		SELECT e.id, e.database_id, e.migration_id, e.revision_id, e.kind, e.status, e.approval_round,
 		       e.requested_by, e.rolls_back_execution_id, src.status, m.version, r.up_sql, r.down_sql, r.sql_hash, r.exec_mode, r.irreversible,
-		       r.batch_table, r.batch_column, r.batch_size
+		       r.batch_table, r.batch_column, r.batch_size, e.batches_committed, e.rows_committed
 		FROM executions e
 		JOIN migration_revisions r ON r.id = e.revision_id
 		JOIN migrations m ON m.id = e.migration_id
@@ -277,7 +328,7 @@ func (r *PgRepo) LoadWork(ctx context.Context, execID int64) (Work, error) {
 		WHERE e.id = $1`, execID).Scan(
 		&w.ExecutionID, &w.DatabaseID, &w.MigrationID, &w.RevisionID, &w.Kind, &w.Status, &w.ApprovalRound,
 		&w.RequestedBy, &w.RollsBackExecutionID, &w.SourceStatus, &w.Version, &w.UpSQL, &w.DownSQL, &w.SQLHash, &w.ExecMode, &w.Irreversible,
-		&w.BatchTable, &w.BatchColumn, &w.BatchSize,
+		&w.BatchTable, &w.BatchColumn, &w.BatchSize, &w.BatchesCommitted, &w.RowsCommitted,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Work{}, ErrExecNotFound

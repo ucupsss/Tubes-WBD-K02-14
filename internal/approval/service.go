@@ -100,6 +100,13 @@ func (s *Service) Revoke(ctx context.Context, q platformdb.DBTX, execID, dbID in
 // Verify dipakai worker saat revalidasi: approval dianggap lengkap bila SETIAP group yang punya akses
 // saat ini punya approval 'approved' dari leader group tersebut saat ini, dan tidak ada yang rejected.
 func (s *Service) Verify(ctx context.Context, q platformdb.DBTX, execID, dbID int64, round int) (Verification, error) {
+	n, err := s.repo.GrantGroupCount(ctx, q, dbID)
+	if err != nil {
+		return Verification{}, err
+	}
+	if n == 0 {
+		return Verification{Complete: false}, nil
+	}
 	missing, err := s.repo.Missing(ctx, q, execID, dbID, round)
 	if err != nil {
 		return Verification{}, err

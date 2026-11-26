@@ -73,6 +73,15 @@ type Execution struct {
 	MigrationID          int64
 	MigrationTitle       string
 	RevisionID           int64
+	RevisionNo           int
+	UpSQL                string
+	DownSQL              *string
+	Irreversible         bool
+	IrreversibleReason   *string
+	ExecMode             string
+	IsTopOfChain         bool
+	IsRolledBack         bool
+	HasActiveRevert      bool
 	Kind                 string
 	Status               string
 	RequestedBy          int64

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -49,6 +50,8 @@ type LogForwarder struct {
 	serviceName string
 	client      *http.Client
 	ch          chan []byte
+	mu          sync.RWMutex
+	closed      bool
 	wg          sync.WaitGroup
 	once        sync.Once
 }
@@ -87,11 +90,15 @@ func (f *LogForwarder) Write(p []byte) (int, error) {
 	if len(cp) == 0 {
 		return len(p), nil
 	}
-	select {
-	case f.ch <- cp:
-	default:
-		// Jangan memblokir aplikasi utama bila buffer penuh.
+	f.mu.RLock()
+	if !f.closed {
+		select {
+		case f.ch <- cp:
+		default:
+			// Jangan memblokir aplikasi utama bila buffer penuh.
+		}
 	}
+	f.mu.RUnlock()
 	return len(p), nil
 }
 
@@ -101,7 +108,10 @@ func (f *LogForwarder) Close() error {
 		return nil
 	}
 	f.once.Do(func() {
+		f.mu.Lock()
+		f.closed = true
 		close(f.ch)
+		f.mu.Unlock()
 		f.wg.Wait()
 	})
 	return nil
@@ -187,6 +197,7 @@ func (f *LogForwarder) ship(line []byte) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if resp, err := f.client.Do(req); err == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
 }

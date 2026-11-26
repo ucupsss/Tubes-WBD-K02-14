@@ -255,3 +255,29 @@ func TestOTLPExporterAndLogForwarder(t *testing.T) {
 		t.Fatalf("OTLP log harus terkirim sekali lewat Collector dan memuat traceID %s: %v", traceID, otlpLogBodies)
 	}
 }
+
+func TestLogForwarder_ConcurrentWriteAndCloseNoPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	fwd := NewLogForwarder("dbmp-race-test", srv.URL)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_, _ = fwd.Write([]byte(`{"msg":"hello","level":"INFO"}` + "\n"))
+		}
+	}()
+	_ = fwd.Close()
+	<-done
+	// Write setelah Close juga tidak boleh panic.
+	if _, err := fwd.Write([]byte(`{"msg":"after-close"}` + "\n")); err != nil {
+		t.Fatalf("Write after Close err = %v", err)
+	}
+	// Double Close tidak boleh panic.
+	if err := fwd.Close(); err != nil {
+		t.Fatalf("second Close err = %v", err)
+	}
+}

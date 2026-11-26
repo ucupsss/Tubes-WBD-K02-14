@@ -40,7 +40,7 @@ func (s *Service) publish(ctx context.Context, p authz.Principal, execID int64, 
 	var jobID int64
 	var dbID int64
 	err := s.inTx(ctx, func(q platformdb.DBTX) error {
-		databaseID, status, _, err := s.repo.LockExecution(ctx, q, execID)
+		databaseID, status, _, _, err := s.repo.LockExecution(ctx, q, execID)
 		if err != nil {
 			return err
 		}
@@ -114,11 +114,14 @@ func (s *Service) Cancel(ctx context.Context, p authz.Principal, execID int64) e
 	}
 	var dbID int64
 	err := s.inTx(ctx, func(q platformdb.DBTX) error {
-		databaseID, status, _, err := s.repo.LockExecution(ctx, q, execID)
+		databaseID, status, _, batchesCommitted, err := s.repo.LockExecution(ctx, q, execID)
 		if err != nil {
 			return err
 		}
 		dbID = databaseID
+		if batchesCommitted > 0 {
+			return ErrNotCancellable
+		}
 		switch status {
 		case StatusApproved:
 			return s.repo.SetCancelled(ctx, q, execID)

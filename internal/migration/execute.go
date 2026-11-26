@@ -103,16 +103,6 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 			return err
 		}
 	}
-	revalCtx, revalSpan := telemetry.Tracer().Start(ctx, "revalidate")
-	err = e.revalidate(revalCtx, w)
-	telemetry.End(revalSpan, err)
-	if err != nil {
-		var halt *worker.Halt
-		if errors.As(err, &halt) {
-			return e.record(ctx, w, job, halt)
-		}
-		return err
-	}
 	lockCtx, lockSpan := telemetry.Tracer().Start(ctx, "lock.acquire")
 	lease, err := e.locks.Acquire(lockCtx, w.DatabaseID, w.ExecutionID, job.ClaimedBy, lock.DefaultLease)
 	telemetry.End(lockSpan, err)
@@ -122,11 +112,13 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 	if err != nil {
 		return err
 	}
-	beat, stopBeat := context.WithCancel(ctx)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	beat, stopBeat := context.WithCancel(runCtx)
 	defer stopBeat()
 	go heartbeat(beat, lease, func(ctx context.Context) error {
 		return queue.Touch(ctx, e.pool, job.ID, job.ClaimedBy)
-	})
+	}, cancelRun)
 
 	release := true
 	defer func() {
@@ -135,11 +127,25 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 		}
 	}()
 
-	target, err := e.conns.Pool(ctx, w.DatabaseID)
+	revalCtx, revalSpan := telemetry.Tracer().Start(runCtx, "revalidate")
+	err = e.revalidate(revalCtx, w)
+	telemetry.End(revalSpan, err)
 	if err != nil {
+		var halt *worker.Halt
+		if errors.As(err, &halt) {
+			return e.record(ctx, w, job, halt)
+		}
+		return err
+	}
+
+	target, err := e.conns.Pool(runCtx, w.DatabaseID)
+	if err != nil {
+		if w.BatchesCommitted > 0 {
+			return e.restorePartial(ctx, w, job, "target_unavailable", "Database tidak dapat dihubungi", "", w.BatchesCommitted, w.RowsCommitted)
+		}
 		return e.fail(ctx, w, job, "target_unavailable", "Database tidak dapat dihubungi", "")
 	}
-	found, err := e.proof(ctx, target, w.ExecutionID)
+	found, err := e.proof(runCtx, target, w.ExecutionID)
 	if err != nil {
 		release = false
 		return e.uncertain(ctx, w, job, "Hasil commit belum dapat dipastikan")
@@ -149,7 +155,7 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 	}
 
 	if w.ExecMode == ModeBatch {
-		return e.runBatch(ctx, target, w, job, &release)
+		return e.runBatch(runCtx, target, w, job, &release)
 	}
 
 	sqlText, err := script(w)
@@ -163,7 +169,7 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 		}
 		version = *w.Version
 	} else {
-		version, err = e.repo.NextChainVersion(ctx, w.DatabaseID)
+		version, err = e.repo.NextChainVersion(runCtx, w.DatabaseID)
 		if err != nil {
 			return err
 		}
@@ -171,7 +177,7 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 
 	logx.Audit(ctx, "start", slog.Int64("execution_id", w.ExecutionID), slog.Int64("database", w.DatabaseID), slog.String("kind", w.Kind))
 	start := time.Now()
-	execCtx, execSpan := telemetry.Tracer().Start(ctx, "target.exec", trace.WithAttributes(
+	execCtx, execSpan := telemetry.Tracer().Start(runCtx, "target.exec", trace.WithAttributes(
 		attribute.Int64("execution_id", w.ExecutionID), attribute.String("kind", w.Kind), attribute.Int("attempt", job.Attempts)))
 	runErr := applyTarget(execCtx, target, w, job, version, sqlText)
 	telemetry.End(execSpan, runErr)
@@ -241,8 +247,8 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 	}
 
 	mirror := batch.NewMirrorRepo(e.pool)
-	var totalBatches int
-	var totalRows int64
+	totalBatches := w.BatchesCommitted
+	totalRows := w.RowsCommitted
 	sink := batch.ProgressFunc(func(ctx context.Context, dir string, batchNo int, from, to, rows int64) error {
 		totalBatches++
 		totalRows += rows
@@ -255,7 +261,7 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 			RowsAffected: rows,
 			CommittedAt:  time.Now().UTC(),
 		})
-		return e.repo.UpdateBatchProgress(ctx, w.ExecutionID, batchNo, totalRows)
+		return e.repo.UpdateBatchProgress(ctx, w.ExecutionID, totalBatches, totalRows)
 	})
 
 	version := int32(0)
@@ -305,6 +311,17 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 		if errors.As(runErr, &pgErr) {
 			state, msg = pgErr.Code, pgErr.Message
 		}
+		if state != "" && queue.Retryable(state) {
+			if res.BatchesCommitted > 0 {
+				_ = e.repo.UpdateBatchProgress(ctx, w.ExecutionID, res.BatchesCommitted, res.RowsCommitted)
+			}
+			if _, again := queue.Backoff(job.Attempts); again {
+				if err := e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", state, msg, execSQL); err != nil {
+					return err
+				}
+				return &queue.SQLError{SQLState: state, Message: msg, Recorded: true}
+			}
+		}
 		if res.Status == batch.StatusPartial || res.Status == batch.StatusPartiallyReverted {
 			partialStatus := StatusPartial
 			if res.Status == batch.StatusPartiallyReverted {
@@ -316,12 +333,6 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 			span.End()
 			logx.Audit(ctx, "fail", slog.Int64("execution_id", w.ExecutionID), slog.String("status", partialStatus), slog.String("reason", state), slog.Int64("database", w.DatabaseID))
 			return &worker.Halt{Disposition: worker.DispositionDone, Message: msg, SQLState: state, Recorded: true}
-		}
-		if state != "" && queue.Retryable(state) {
-			if err := e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", state, msg, execSQL); err != nil {
-				return err
-			}
-			return &queue.SQLError{SQLState: state, Message: msg, Recorded: true}
 		}
 		if state == "" {
 			state = "batch_failed"
@@ -335,7 +346,23 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 			*release = false
 			return e.uncertain(ctx, w, job, "Hasil commit bukti akhir batch belum dapat dipastikan")
 		}
-		return e.fail(ctx, w, job, "target_finalize_failed", "Gagal menulis bukti akhir batch di database target", execSQL)
+		var pgErr *pgconn.PgError
+		state, msg := "target_finalize_failed", "Gagal menulis bukti akhir batch di database target"
+		if errors.As(err, &pgErr) {
+			state, msg = pgErr.Code, pgErr.Message
+			if queue.Retryable(state) {
+				if _, again := queue.Backoff(job.Attempts); again {
+					if ierr := e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", state, msg, execSQL); ierr != nil {
+						return ierr
+					}
+					return &queue.SQLError{SQLState: state, Message: msg, Recorded: true}
+				}
+			}
+		}
+		if res.BatchesCommitted > 0 {
+			return e.restorePartial(ctx, w, job, state, msg, execSQL, res.BatchesCommitted, res.RowsCommitted)
+		}
+		return e.fail(ctx, w, job, state, msg, execSQL)
 	}
 	return e.succeed(ctx, w, job, execSQL)
 }
@@ -451,12 +478,19 @@ func (e *Executor) revalidate(ctx context.Context, w Work) error {
 			return haltFail("access_lost", "Peminta tidak lagi punya akses edit")
 		}
 	}
-	blocked, err := e.repo.BlocksDatabase(ctx, e.repo.db, w.DatabaseID, w.ExecutionID)
+	blocked, err := e.repo.HardBlocksDatabase(ctx, e.repo.db, w.DatabaseID, w.ExecutionID)
 	if err != nil {
 		return err
 	}
 	if blocked {
 		return haltFail("blocked", "Masih ada eksekusi yang belum selesai pada database ini")
+	}
+	running, err := e.repo.HasRunningExecution(ctx, e.repo.db, w.DatabaseID, w.ExecutionID)
+	if err != nil {
+		return err
+	}
+	if running {
+		return &worker.Halt{Disposition: worker.DispositionRetry, Message: "Eksekusi lain sedang berjalan pada database ini", Recorded: true}
 	}
 	if w.RevertsPartial() {
 		// Revert batch committed: hanya mungkin untuk mode batch, dan migration-nya tidak pernah aktif.
@@ -486,7 +520,10 @@ func (e *Executor) revalidate(ctx context.Context, w Work) error {
 			return err
 		}
 		if !complete {
-			if _, err := e.check.Revoke(ctx, e.repo.db, w.ExecutionID, w.DatabaseID); err != nil {
+			if err := platformdb.WithTx(ctx, e.pool, func(tx pgx.Tx) error {
+				_, err := e.check.Revoke(ctx, tx, w.ExecutionID, w.DatabaseID)
+				return err
+			}); err != nil {
 				return err
 			}
 			return &worker.Halt{
@@ -545,8 +582,24 @@ func (e *Executor) uncertain(ctx context.Context, w Work, job queue.Job, message
 	return &worker.Halt{Disposition: worker.DispositionUncertain, Message: message, Recorded: true}
 }
 
+func (e *Executor) restorePartial(ctx context.Context, w Work, job queue.Job, code, message, sqlText string, batches int, rows int64) error {
+	partialStatus := StatusPartial
+	if w.Kind == KindRollback {
+		partialStatus = StatusPartiallyReverted
+	}
+	histCtx, span := historySpan(ctx, w, partialStatus)
+	_ = e.repo.MarkPartial(histCtx, w.ExecutionID, partialStatus, code, message, batches, rows)
+	_ = e.repo.InsertAttempt(histCtx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", code, message, sqlText)
+	span.End()
+	logx.Audit(ctx, "fail", slog.Int64("execution_id", w.ExecutionID), slog.String("status", partialStatus), slog.String("reason", code), slog.Int64("database", w.DatabaseID))
+	return &worker.Halt{Disposition: worker.DispositionDone, Message: message, SQLState: code, Recorded: true}
+}
+
 func (e *Executor) record(ctx context.Context, w Work, job queue.Job, halt *worker.Halt) error {
 	if halt.Disposition == worker.DispositionDead && halt.SQLState != "" {
+		if w.BatchesCommitted > 0 {
+			return e.restorePartial(ctx, w, job, halt.SQLState, halt.Message, "", w.BatchesCommitted, w.RowsCommitted)
+		}
 		_ = e.repo.MarkFailedCode(ctx, w.ExecutionID, halt.SQLState, halt.Message)
 		_ = e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "failed", halt.SQLState, halt.Message, "")
 		logx.Audit(ctx, "fail", slog.Int64("execution_id", w.ExecutionID), slog.String("reason", halt.SQLState))
@@ -577,7 +630,8 @@ func haltFail(code, message string) error {
 var heartbeatEvery = lock.HeartbeatEvery
 
 // heartbeat memperpanjang lease kunci database dan menyegarkan claimed_at job selama eksekusi berjalan.
-func heartbeat(ctx context.Context, lease lock.Lease, touchJob func(context.Context) error) {
+// Jika lease direbut (lock.ErrBusy), onLost dipanggil untuk membatalkan eksekusi yang sedang berjalan.
+func heartbeat(ctx context.Context, lease lock.Lease, touchJob func(context.Context) error, onLost ...func()) {
 	t := time.NewTicker(heartbeatEvery)
 	defer t.Stop()
 	for {
@@ -587,6 +641,14 @@ func heartbeat(ctx context.Context, lease lock.Lease, touchJob func(context.Cont
 		case <-t.C:
 			if err := lease.Heartbeat(ctx); err != nil {
 				slog.WarnContext(ctx, "lock.heartbeat", "err", err, "database", lease.DatabaseID(), "execution_id", lease.ExecutionID())
+				if errors.Is(err, lock.ErrBusy) {
+					for _, fn := range onLost {
+						if fn != nil {
+							fn()
+						}
+					}
+					return
+				}
 			}
 			if touchJob != nil {
 				if err := touchJob(ctx); err != nil {

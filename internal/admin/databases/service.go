@@ -117,8 +117,16 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 
 func (s *Service) TestConnection(ctx context.Context, id int64, in UpdateInput) error {
 	plainPassword := in.Password
+	conn := Connection{
+		Host:     strings.TrimSpace(in.Host),
+		Port:     in.Port,
+		DBName:   strings.TrimSpace(in.DBName),
+		Username: strings.TrimSpace(in.Username),
+		SSLMode:  in.SSLMode,
+	}
 
-	// Jika password kosong dan ID ada, gunakan password tersimpan
+	// Jika password kosong dan ID ada, gunakan password tersimpan DAN kunci Host/Port/Username/SSLMode
+	// ke nilai tersimpan agar password write-only tidak dapat dieksfiltrasi ke host lain.
 	if plainPassword == "" && id > 0 {
 		existing, err := s.repo.GetByID(ctx, s.db, id)
 		if err != nil {
@@ -129,20 +137,19 @@ func (s *Service) TestConnection(ctx context.Context, id int64, in UpdateInput) 
 			return fmt.Errorf("gagal mendekripsi password yang tersimpan: %w", err)
 		}
 		plainPassword = string(decrypted)
+		conn.Host = existing.Host
+		conn.Port = existing.Port
+		conn.Username = existing.Username
+		conn.SSLMode = existing.SSLMode
+		if conn.DBName == "" {
+			conn.DBName = existing.DBName
+		}
 	}
 
 	if plainPassword == "" {
 		return apperr.InvalidFields("Input tidak valid", map[string]string{
 			"password": "Password wajib diisi untuk menguji koneksi",
 		})
-	}
-
-	conn := Connection{
-		Host:     strings.TrimSpace(in.Host),
-		Port:     in.Port,
-		DBName:   strings.TrimSpace(in.DBName),
-		Username: strings.TrimSpace(in.Username),
-		SSLMode:  in.SSLMode,
 	}
 
 	return s.manager.TestConnection(ctx, conn, plainPassword)

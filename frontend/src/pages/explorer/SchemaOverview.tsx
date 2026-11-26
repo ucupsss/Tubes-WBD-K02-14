@@ -39,9 +39,9 @@ export function SchemaOverviewPage() {
                   <Link className="btn btn-ghost" to={`/db/${id}/executions`}>
                     Riwayat Eksekusi
                   </Link>
-                  <a className="btn btn-ghost" href={`/db/${id}/migrations`}>
+                  <Link className="btn btn-ghost" to={`/db/${id}/migrations`}>
                     Migrations
-                  </a>
+                  </Link>
                   {canEdit && (
                     <button type="button" className="btn btn-primary" onClick={() => setShowExplain(v => !v)}>
                       {showExplain ? 'Tutup EXPLAIN' : 'Analisis EXPLAIN'}

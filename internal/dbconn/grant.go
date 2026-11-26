@@ -19,13 +19,14 @@ func NewGrantRepo(db platformdb.DBTX) *GrantRepo {
 	return &GrantRepo{db: db}
 }
 
-// LevelsForUser mengambil semua level akses user untuk suatu target DB dari seluruh grup yang diikutinya.
+// LevelsForUser mengambil semua level akses user aktif untuk suatu target DB dari seluruh grup yang diikutinya.
 func (r *GrantRepo) LevelsForUser(ctx context.Context, userID, dbID int64) ([]authz.Level, error) {
 	const q = `
 		SELECT gda.level
 		FROM group_db_access gda
 		JOIN group_members gm ON gm.group_id = gda.group_id
-		WHERE gm.user_id = $1 AND gda.database_id = $2`
+		JOIN users u ON u.id = gm.user_id
+		WHERE gm.user_id = $1 AND gda.database_id = $2 AND u.is_active`
 
 	rows, err := r.db.Query(ctx, q, userID, dbID)
 	if err != nil {
@@ -57,7 +58,8 @@ func (r *GrantRepo) AccessibleDatabases(ctx context.Context, userID int64) ([]au
 		FROM db_connections dc
 		JOIN group_db_access gda ON gda.database_id = dc.id
 		JOIN group_members gm ON gm.group_id = gda.group_id
-		WHERE gm.user_id = $1
+		JOIN users u ON u.id = gm.user_id
+		WHERE gm.user_id = $1 AND u.is_active
 		ORDER BY dc.name ASC`
 
 	rows, err := r.db.Query(ctx, q, userID)

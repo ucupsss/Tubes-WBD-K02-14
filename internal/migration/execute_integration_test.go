@@ -277,3 +277,79 @@ func (g connGetter) GetByID(ctx context.Context, id int64) (dbconn.Connection, e
 	}
 	return c, nil
 }
+
+func TestExecute_ConcurrentRunningRetriesNotFatal(t *testing.T) {
+	fx, target := targetFixture(t)
+	first := create(t, fx, "Sedang Jalan", "SELECT 1", "SELECT 1", false, "")
+	second := create(t, fx, "Menunggu", "CREATE TABLE waited (id int)", "DROP TABLE waited", false, "")
+	a := submit(t, fx, first.ID)
+	b := submit(t, fx, second.ID)
+	setExecStatus(t, fx, a.ID, migration.StatusRunning)
+	approve(t, fx, b.ID)
+	setExecStatus(t, fx, b.ID, migration.StatusQueued)
+
+	err := executor(t, fx).Run(context.Background(), jobOf(b.ID, fx.dbID))
+	if !isHalt(err, worker.DispositionRetry) {
+		t.Fatalf("concurrent running seharusnya DispositionRetry, bukan fatal: err = %v", err)
+	}
+	if tableExists(t, target, "waited") {
+		t.Fatal("SQL tidak boleh dijalankan saat eksekusi lain masih running")
+	}
+}
+
+func TestExecute_DeactivatedUserRejected(t *testing.T) {
+	fx, target := targetFixture(t)
+	m := create(t, fx, "Nonaktif", "CREATE TABLE inactive_u (id int)", "DROP TABLE inactive_u", false, "")
+	exec := submit(t, fx, m.ID)
+	approve(t, fx, exec.ID)
+	setExecStatus(t, fx, exec.ID, migration.StatusQueued)
+
+	if _, err := fx.platform.Exec(context.Background(), `UPDATE users SET is_active = false WHERE id = $1`, fx.editor.UserID); err != nil {
+		t.Fatal(err)
+	}
+	err := executor(t, fx).Run(context.Background(), jobOf(exec.ID, fx.dbID))
+	if !isHalt(err, worker.DispositionDead) {
+		t.Fatalf("user nonaktif harus ditolak saat revalidasi, err = %v", err)
+	}
+	var code *string
+	if err := fx.platform.QueryRow(context.Background(), `SELECT error_code FROM executions WHERE id = $1`, exec.ID).Scan(&code); err != nil || code == nil || *code != "access_lost" {
+		t.Fatalf("error_code = %v, want access_lost", code)
+	}
+	if tableExists(t, target, "inactive_u") {
+		t.Fatal("user nonaktif tidak boleh menjalankan SQL")
+	}
+}
+
+func TestExecute_CancelRejectsCommittedBatches(t *testing.T) {
+	fx, _ := targetFixture(t)
+	m := create(t, fx, "BatchCancel", "SELECT 1", "SELECT 1", false, "")
+	exec := submit(t, fx, m.ID)
+	approve(t, fx, exec.ID)
+	if _, err := fx.platform.Exec(context.Background(), `UPDATE executions SET status = 'queued', batches_committed = 2 WHERE id = $1`, exec.ID); err != nil {
+		t.Fatal(err)
+	}
+	fx.srv.Service.WithQueue(queue.New(fx.platform))
+	err := fx.srv.Service.Cancel(context.Background(), fx.editor, exec.ID)
+	if !errors.Is(err, migration.ErrNotCancellable) {
+		t.Fatalf("Cancel dengan batches_committed > 0 harus ErrNotCancellable, err = %v", err)
+	}
+}
+
+func TestExecute_MarkQueuedPreservesUncertain(t *testing.T) {
+	fx, _ := targetFixture(t)
+	m := create(t, fx, "UncertainSafe", "SELECT 1", "SELECT 1", false, "")
+	exec := submit(t, fx, m.ID)
+	setExecStatus(t, fx, exec.ID, migration.StatusUncertain)
+
+	repo := migration.NewPgRepo().Bind(fx.platform)
+	if err := repo.MarkQueued(context.Background(), exec.ID); err != nil {
+		t.Fatal(err)
+	}
+	st, err := repo.ExecutionStatus(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != migration.StatusUncertain {
+		t.Fatalf("status = %s, want uncertain (MarkQueued tidak boleh menimpa uncertain)", st)
+	}
+}

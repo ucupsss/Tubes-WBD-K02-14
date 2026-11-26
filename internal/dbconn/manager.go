@@ -66,40 +66,39 @@ func (m *DefaultManager) Pool(ctx context.Context, dbID int64) (*pgxpool.Pool, e
 		if err := pool.Ping(pingCtx); err == nil {
 			return pool, nil
 		}
-		// Jika ping gagal, invalidasi pool lama
+		// Jangan meng-invalidate pool yang sehat hanya karena context request pemanggil dibatalkan.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Jika ping gagal karena koneksi target bermasalah, invalidasi pool lama
 		m.Invalidate(dbID)
 	}
 
-	// 2. Buat pool baru (write lock)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Double check setelah write lock
-	if pool, exists := m.pools[dbID]; exists {
-		return pool, nil
-	}
-
-	// Ambil metadata koneksi dari repo platform
+	// 2. Ambil metadata & buka pool baru di luar global write lock supaya satu DB yang lambat/mati
+	// tidak memblokir request ke database lain.
 	conn, err := m.repo.GetByID(ctx, dbID)
 	if err != nil {
 		return nil, err // ErrNotFound atau err internal
 	}
 
-	// Dekripsi password
 	plainPassword, err := Decrypt(conn.PasswordEnc, m.secretKey)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mendekripsi password koneksi: %w", err)
 	}
 
-	// Buat pgxpool baru dengan timeout koneksi
 	dsn := conn.BuildDSN(string(plainPassword))
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
 
-	if m.tracer != nil {
-		cfg.ConnConfig.Tracer = m.tracer
+	m.mu.RLock()
+	tracer := m.tracer
+	m.mu.RUnlock()
+	if tracer != nil {
+		cfg.ConnConfig.Tracer = tracer
+	} else {
+		cfg.ConnConfig.Tracer = telemetry.PgxTracer()
 	}
 
 	// Konfigurasi pool standar
@@ -107,7 +106,6 @@ func (m *DefaultManager) Pool(ctx context.Context, dbID int64) (*pgxpool.Pool, e
 	cfg.MinConns = 1
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
-	cfg.ConnConfig.Tracer = telemetry.PgxTracer()
 
 	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connectCancel()
@@ -123,7 +121,15 @@ func (m *DefaultManager) Pool(ctx context.Context, dbID int64) (*pgxpool.Pool, e
 		return nil, fmt.Errorf("%w: koneksi gagal merespons", ErrUnavailable)
 	}
 
+	// 3. Simpan ke cache dengan double-check (tutup pool ekstra jika goroutine lain lebih dulu selesai).
+	m.mu.Lock()
+	if existing, ok := m.pools[dbID]; ok {
+		m.mu.Unlock()
+		newPool.Close()
+		return existing, nil
+	}
 	m.pools[dbID] = newPool
+	m.mu.Unlock()
 	return newPool, nil
 }
 

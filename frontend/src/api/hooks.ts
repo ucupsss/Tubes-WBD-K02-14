@@ -30,7 +30,8 @@ export const keys = {
   tableMeta: (dbId: number, schema: string, table: string) => ['databases', dbId, 'tables', schema, table] as const,
   tableData: (dbId: number, schema: string, table: string, page: number, pageSize: number) =>
     ['databases', dbId, 'tables', schema, table, 'data', page, pageSize] as const,
-  executions: (dbId: number, hideRollback: boolean) => ['databases', dbId, 'executions', hideRollback] as const,
+  executions: (dbId: number, hideRollback: boolean, page = 1) =>
+    ['databases', dbId, 'executions', hideRollback, page] as const,
   execution: (execId: number) => ['executions', execId] as const,
   job: (jobId: number) => ['jobs', jobId] as const,
   users: ['admin', 'users'] as const,
@@ -80,22 +81,31 @@ export const runMigrationExplain = (dbId: number, migrationId: number, analyze: 
   api.post<ExplainReport>(`/api/databases/${dbId}/migrations/${migrationId}/explain`, { analyze })
 
 // --- Executions & Jobs (B5) ---
-export const useDatabaseExecutions = (dbId: number, hideRollback: boolean) =>
+export const useDatabaseExecutions = (dbId: number, hideRollback: boolean, page = 1, pageSize = 50) =>
   useQuery({
-    queryKey: keys.executions(dbId, hideRollback),
+    queryKey: keys.executions(dbId, hideRollback, page),
     queryFn: () =>
-      api.get<Items<ExecutionItem>>(
-        `/api/databases/${dbId}/executions?hide_rollback=${hideRollback ? 'true' : 'false'}`,
+      api.get<Paged<ExecutionItem>>(
+        `/api/databases/${dbId}/executions?hide_rollback=${hideRollback ? 'true' : 'false'}&page=${page}&page_size=${pageSize}`,
       ),
     enabled: Number.isFinite(dbId) && dbId > 0,
   })
 
-export const useExecutionDetail = (execId: number, pollMs?: number | false) =>
+export const useExecutionDetail = (execId: number, pollMs: number | false = 1500) =>
   useQuery({
     queryKey: keys.execution(execId),
     queryFn: () => api.get<ExecutionDetailResponse>(`/api/executions/${execId}`),
     enabled: Number.isFinite(execId) && execId > 0,
-    refetchInterval: pollMs || false,
+    refetchInterval: query => {
+      if (!pollMs) {
+        return false
+      }
+      const st = query.state.data?.execution?.status
+      if (!st || ['queued', 'running', 'uncertain'].includes(st)) {
+        return pollMs
+      }
+      return false
+    },
   })
 
 export const useJobStatus = (jobId: number | null, pollMs: number | false = 1500) =>

@@ -229,6 +229,11 @@ func finishHalt(ctx context.Context, jobs Jobs, exec Executions, workerID string
 				return err
 			}
 		}
+		const maxUncertainAttempts = 10
+		if job.Attempts >= maxUncertainAttempts {
+			slog.WarnContext(ctx, "job.uncertain_cap", "job_id", job.ID, "execution_id", job.ExecutionID, "attempts", job.Attempts)
+			return jobs.Complete(ctx, job.ID, queue.StatusDead)
+		}
 		return jobs.Requeue(ctx, job.ID, 15*time.Second)
 	case DispositionRetry:
 		if err := exec.MarkQueued(ctx, job.ExecutionID); err != nil {
