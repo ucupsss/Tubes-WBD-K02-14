@@ -15,6 +15,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/auth"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/config"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/metrics"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 	"github.com/ucupsss/Tubes-WBD-K02-14/web"
@@ -64,6 +65,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer a.Conns.CloseAll()
+	metrics.Registry.MustRegister(
+		metrics.PoolCollector{Platform: pool, Targets: a.Conns.Pools},
+		metrics.QueueCollector{Pool: pool},
+	)
+	metrics.Serve(ctx, cfg.MetricsAddr)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

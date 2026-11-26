@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
 )
@@ -113,24 +114,30 @@ func (r *PgRepo) MarkSucceeded(ctx context.Context, execID int64) error {
 }
 
 // InsertAttempt mencatat satu percobaan teknis beserta trace_id aktif bila ada.
+// Riwayat attempt tidak pernah ditimpa: bila nomor attemptNo sudah terpakai (mis. job diklaim ulang
+// setelah worker mati tanpa menaikkan hitungan attempt), percobaan ini dicatat dengan nomor berikutnya.
 func (r *PgRepo) InsertAttempt(ctx context.Context, execID int64, attemptNo int, workerID, status, sqlstate, message, sqlText string) error {
 	if err := r.needDB(); err != nil {
 		return err
 	}
 	traceID, _ := telemetry.ExtractTraceIDs(ctx)
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO execution_attempts (
-			execution_id, attempt_no, worker_id, status, sql_executed, sqlstate, error_message, started_at, finished_at, trace_id)
-		VALUES ($1, $2, $3, $4, $7, NULLIF($5, ''), NULLIF($6, ''), now(), now(), NULLIF($8, ''))
-		ON CONFLICT (execution_id, attempt_no) DO UPDATE SET
-			worker_id = EXCLUDED.worker_id,
-			status = EXCLUDED.status,
-			sql_executed = EXCLUDED.sql_executed,
-			sqlstate = EXCLUDED.sqlstate,
-			error_message = EXCLUDED.error_message,
-			finished_at = now(),
-			trace_id = EXCLUDED.trace_id`,
-		execID, attemptNo, workerID, status, sqlstate, message, sqlText, traceID)
+	var err error
+	// Dua worker yang mencatat attempt bersamaan bisa memilih nomor yang sama; coba lagi dengan nomor baru.
+	for range 3 {
+		_, err = r.db.Exec(ctx, `
+			INSERT INTO execution_attempts (
+				execution_id, attempt_no, worker_id, status, sql_executed, sqlstate, error_message, started_at, finished_at, trace_id)
+			SELECT $1,
+			       CASE WHEN EXISTS (SELECT 1 FROM execution_attempts WHERE execution_id = $1 AND attempt_no = $2)
+			            THEN (SELECT MAX(attempt_no) + 1 FROM execution_attempts WHERE execution_id = $1)
+			            ELSE $2 END,
+			       $3, $4, $7, NULLIF($5, ''), NULLIF($6, ''), now(), now(), NULLIF($8, '')`,
+			execID, attemptNo, workerID, status, sqlstate, message, sqlText, traceID)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			break
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("migration.InsertAttempt: %w", err)
 	}

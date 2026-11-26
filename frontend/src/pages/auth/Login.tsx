@@ -28,9 +28,7 @@ export function Login() {
   return (
     <main className="login-page">
       <form className="card login-card" onSubmit={e => void onSubmit(e)} noValidate>
-        <h1>
-          <span aria-hidden="true">🌸</span> Tubes WBD
-        </h1>
+        <h1>Tubes WBD</h1>
         <p className="muted">Masuk untuk mengelola database dan migration.</p>
         {submit.error && <Alert>{submit.error}</Alert>}
         <Field label="Username">

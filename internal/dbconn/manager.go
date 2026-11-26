@@ -42,6 +42,17 @@ func (m *DefaultManager) SetTracer(t pgx.QueryTracer) {
 	m.mu.Unlock()
 }
 
+// Pools mengembalikan salinan daftar pool target yang sedang terbuka. Dipakai metrik pool koneksi.
+func (m *DefaultManager) Pools() []*pgxpool.Pool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	list := make([]*pgxpool.Pool, 0, len(m.pools))
+	for _, p := range m.pools {
+		list = append(list, p)
+	}
+	return list
+}
+
 // NewManager membuat instance DefaultManager baru.
 func NewManager(repo ConnectionGetter, secretKey []byte) *DefaultManager {
 	return &DefaultManager{

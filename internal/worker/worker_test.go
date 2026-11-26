@@ -123,3 +123,29 @@ func (f *fakeExec) MarkUncertain(context.Context, int64, string) error {
 	f.final = "uncertain"
 	return nil
 }
+
+func TestOutcome_MatchesProcessDecision(t *testing.T) {
+	cases := []struct {
+		name            string
+		err             error
+		attempts        int
+		outcome, reason string
+	}{
+		{"nil sukses", nil, 1, OutcomeSuccess, ""},
+		{"halt sukses", &Halt{Disposition: DispositionSuccess}, 1, OutcomeSuccess, ""},
+		{"halt done", &Halt{Disposition: DispositionDone}, 1, OutcomeDone, ""},
+		{"halt uncertain", &Halt{Disposition: DispositionUncertain}, 1, OutcomeUncertain, ""},
+		{"halt dead", &Halt{Disposition: DispositionDead, SQLState: "42601"}, 1, OutcomeFailed, ""},
+		{"retry tanpa alasan", &Halt{Disposition: DispositionRetry}, 1, OutcomeRetry, "deferred"},
+		{"kunci sibuk", &Halt{Disposition: DispositionRetry, Reason: "lock_busy"}, 1, OutcomeRetry, "lock_busy"},
+		{"sql retry", &queue.SQLError{SQLState: "55P03"}, 1, OutcomeRetry, "55P03"},
+		{"sql retry habis", &queue.SQLError{SQLState: "55P03"}, queue.MaxAttempts, OutcomeFailed, ""},
+		{"sql tidak bisa retry", &queue.SQLError{SQLState: "42601"}, 1, OutcomeFailed, ""},
+	}
+	for _, c := range cases {
+		outcome, reason := Outcome(c.err, c.attempts)
+		if outcome != c.outcome || reason != c.reason {
+			t.Errorf("%s: Outcome = (%s, %s), want (%s, %s)", c.name, outcome, reason, c.outcome, c.reason)
+		}
+	}
+}

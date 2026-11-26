@@ -25,7 +25,7 @@ export function Layout() {
       <header className="topbar">
         <div className="topbar-inner">
           <NavLink to="/" className="brand" onClick={close}>
-            <span aria-hidden="true">🌸</span> Tubes WBD
+            Tubes WBD
           </NavLink>
           <button
             type="button"

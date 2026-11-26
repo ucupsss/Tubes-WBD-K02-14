@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/apperr"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 )
 
 // IsAPI melaporkan apakah request ditujukan ke API JSON (path diawali /api/).
@@ -71,7 +72,7 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 		slog.ErrorContext(r.Context(), "request error",
 			"err", err,
 			"method", r.Method,
-			"path", r.URL.Path,
+			"path", logx.Safe(r.URL.Path),
 			"user_id", userID(r),
 		)
 	}

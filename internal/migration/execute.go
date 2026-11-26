@@ -16,6 +16,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/lock"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/metrics"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/telemetry"
@@ -104,14 +105,17 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 		}
 	}
 	lockCtx, lockSpan := telemetry.Tracer().Start(ctx, "lock.acquire")
+	lockStart := time.Now()
 	lease, err := e.locks.Acquire(lockCtx, w.DatabaseID, w.ExecutionID, job.ClaimedBy, lock.DefaultLease)
 	telemetry.End(lockSpan, err)
+	observeLock(lockStart, err)
 	if errors.Is(err, lock.ErrBusy) {
-		return &worker.Halt{Disposition: worker.DispositionRetry, Message: lock.ErrBusy.Msg, Recorded: true}
+		return &worker.Halt{Disposition: worker.DispositionRetry, Message: lock.ErrBusy.Msg, Recorded: true, Reason: "lock_busy"}
 	}
 	if err != nil {
 		return err
 	}
+	metrics.LockWait.Observe(metrics.Since(job.EnqueuedAt))
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	beat, stopBeat := context.WithCancel(runCtx)
@@ -181,6 +185,7 @@ func (e *Executor) Run(ctx context.Context, job queue.Job) error {
 		attribute.Int64("execution_id", w.ExecutionID), attribute.String("kind", w.Kind), attribute.Int("attempt", job.Attempts)))
 	runErr := applyTarget(execCtx, target, w, job, version, sqlText)
 	telemetry.End(execSpan, runErr)
+	observeMigration(w.Kind, ModeNormal, start, runErr)
 	logTxOutcome(ctx, w, job, runErr)
 	logx.SQL(ctx, logx.SQLEvent{
 		Query: sqlText, Duration: time.Since(start), Rows: -1, Err: runErr,
@@ -252,6 +257,8 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 	sink := batch.ProgressFunc(func(ctx context.Context, dir string, batchNo int, from, to, rows int64) error {
 		totalBatches++
 		totalRows += rows
+		metrics.BatchesCommitted.WithLabelValues(dir).Inc()
+		metrics.BatchRows.WithLabelValues(dir).Add(float64(rows))
 		_ = mirror.RecordBatch(ctx, batch.Checkpoint{
 			ExecutionID:  w.ExecutionID,
 			Direction:    dir,
@@ -286,11 +293,13 @@ func (e *Executor) runBatch(ctx context.Context, target *pgxpool.Pool, w Work, j
 		res    batch.Result
 		runErr error
 	)
+	batchStart := time.Now()
 	if w.Kind == KindRollback {
 		res, runErr = e.batchRunner.Revert(ctx, target, spec, sink)
 	} else {
 		res, runErr = e.batchRunner.Apply(ctx, target, spec, sink)
 	}
+	observeMigration(w.Kind, ModeBatch, batchStart, runErr)
 
 	execSQL := res.LastExecutedSQL
 	if execSQL == "" {
@@ -411,9 +420,11 @@ func finalizeBatchTarget(ctx context.Context, pool *pgxpool.Pool, w Work, job qu
 // recover memeriksa bukti di target. done berarti hasil sudah diputuskan.
 // Bila tidak ada bukti dan koneksi sehat, eksekusi boleh diulang.
 func (e *Executor) recover(ctx context.Context, w *Work, job queue.Job) (bool, error) {
+	lockStart := time.Now()
 	lease, err := e.locks.Acquire(ctx, w.DatabaseID, w.ExecutionID, job.ClaimedBy, lock.DefaultLease)
+	observeLock(lockStart, err)
 	if errors.Is(err, lock.ErrBusy) {
-		return true, &worker.Halt{Disposition: worker.DispositionRetry, Message: lock.ErrBusy.Msg, Recorded: true}
+		return true, &worker.Halt{Disposition: worker.DispositionRetry, Message: lock.ErrBusy.Msg, Recorded: true, Reason: "lock_busy"}
 	}
 	if err != nil {
 		return true, err
@@ -490,7 +501,7 @@ func (e *Executor) revalidate(ctx context.Context, w Work) error {
 		return err
 	}
 	if running {
-		return &worker.Halt{Disposition: worker.DispositionRetry, Message: "Eksekusi lain sedang berjalan pada database ini", Recorded: true}
+		return &worker.Halt{Disposition: worker.DispositionRetry, Message: "Eksekusi lain sedang berjalan pada database ini", Recorded: true, Reason: "db_busy"}
 	}
 	if w.RevertsPartial() {
 		// Revert batch committed: hanya mungkin untuk mode batch, dan migration-nya tidak pernah aktif.
@@ -554,7 +565,7 @@ func (e *Executor) succeed(ctx context.Context, w Work, job queue.Job, sqlText s
 	}
 	if err := e.repo.MarkApplied(ctx, w, version); err != nil {
 		// Target sudah commit. Jangan menandai execution gagal; catatan platform dicoba lagi.
-		return &worker.Halt{Disposition: worker.DispositionRetry, Message: "Gagal mencatat hasil di database platform", Recorded: true}
+		return &worker.Halt{Disposition: worker.DispositionRetry, Message: "Gagal mencatat hasil di database platform", Recorded: true, Reason: "platform_record"}
 	}
 	_ = e.repo.InsertAttempt(ctx, w.ExecutionID, job.Attempts, job.ClaimedBy, "success", "", "", sqlText)
 	action := "finish"
@@ -610,6 +621,28 @@ func (e *Executor) record(ctx context.Context, w Work, job queue.Job, halt *work
 		halt.Recorded = true
 	}
 	return halt
+}
+
+// observeLock mencatat lama satu percobaan mengambil kunci database target per hasil.
+func observeLock(start time.Time, err error) {
+	result := "acquired"
+	switch {
+	case errors.Is(err, lock.ErrBusy):
+		result = "busy"
+	case err != nil:
+		result = "error"
+	}
+	metrics.LockAcquire.WithLabelValues(result).Observe(metrics.Since(start))
+}
+
+// observeMigration mencatat lama SQL migration di database target. Label hanya kind, mode, dan
+// hasil (success atau failed), tanpa ID atau teks SQL.
+func observeMigration(kind, mode string, start time.Time, runErr error) {
+	result := "success"
+	if runErr != nil {
+		result = "failed"
+	}
+	metrics.MigrationDuration.WithLabelValues(kind, mode, result).Observe(metrics.Since(start))
 }
 
 func script(w Work) (string, error) {

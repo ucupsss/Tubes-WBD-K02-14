@@ -8,6 +8,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/csrf"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/httpx"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/session"
 )
 
@@ -43,7 +44,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	u, err := h.d.Auth.Authenticate(r.Context(), req.Username, req.Password)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
-		h.d.Logger.WarnContext(r.Context(), "auth.login_failed", "username", req.Username) // password tidak pernah di-log
+		h.d.Logger.WarnContext(r.Context(), "auth.login_failed", "username", logx.Safe(req.Username)) // password tidak pernah di-log
 		httpx.WriteJSON(w, http.StatusUnauthorized, httpx.ErrorBody{Error: httpx.ErrorDetail{
 			Code: "invalid_credentials", Message: auth.ErrInvalidCredentials.Msg, Details: map[string]any{},
 		}})

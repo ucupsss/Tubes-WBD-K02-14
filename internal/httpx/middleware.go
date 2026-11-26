@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/authz"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
 )
 
 // MaxBodyBytes adalah batas default ukuran body request (1 MB).
@@ -43,7 +44,7 @@ func Recover(logger *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					logger.ErrorContext(r.Context(), "panic", "err", rec, "method", r.Method, "path", r.URL.Path)
+					logger.ErrorContext(r.Context(), "panic", "err", rec, "method", r.Method, "path", logx.Safe(r.URL.Path))
 					if IsAPI(r) {
 						WriteJSON(w, http.StatusInternalServerError, ErrorBody{
 							Error: ErrorDetail{
@@ -75,7 +76,7 @@ func Logger(logger *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(sw, r)
 			attrs := []any{
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", logx.Safe(r.URL.Path),
 				"status", sw.status,
 				"duration_ms", time.Since(start).Milliseconds(),
 			}

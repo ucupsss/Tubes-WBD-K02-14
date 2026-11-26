@@ -17,6 +17,7 @@ import (
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/dbconn"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/lock"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/logx"
+	"github.com/ucupsss/Tubes-WBD-K02-14/internal/metrics"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/migration"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/platformdb"
 	"github.com/ucupsss/Tubes-WBD-K02-14/internal/queue"
@@ -65,6 +66,8 @@ func main() {
 	repo := migration.NewPgRepo().Bind(pool)
 	conns := dbconn.NewManager(connGetter{db: pool, repo: databases.NewPgRepo()}, cfg.SecretKey)
 	defer conns.CloseAll()
+	metrics.Registry.MustRegister(metrics.PoolCollector{Platform: pool, Targets: conns.Pools})
+	metrics.Serve(ctx, cfg.WorkerMetricsAddr)
 	approvals := approval.NewService(pool, approval.PoolTx{Pool: pool}, approval.NewPgRepo(), repo)
 	runner := migration.NewExecutor(pool, repo, conns, lock.New(pool), migration.WrapApproval(approvals), authz.NewAuthorizer(dbconn.NewGrantRepo(pool)))
 	logger.Info("worker started", "worker_id", workerID, "concurrency", cfg.WorkerConcurrency)

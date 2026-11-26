@@ -36,7 +36,7 @@ Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-
 |-------------------------|---------------------------------------------------------------------------|
 | `make up` / `make down` | Menyalakan / mematikan Postgres                                           |
 | `make db-reset`         | Menghapus volume lalu menyalakan ulang dari kosong                        |
-| `make obs-up` / `make obs-down` | Menyalakan / mematikan stack Observability (OTel Collector, Tempo, Loki, Grafana) |
+| `make obs-up` / `make obs-down` | Menyalakan / mematikan stack Observability (OTel Collector, Tempo, Loki, Prometheus, Grafana) |
 | `make worker`       | Worker antrian migration, proses terpisah dari API                        |
 | `make k6`           | Stress test k6: API baca dan job migration. Butuh [k6](https://grafana.com/docs/k6/), server, dan worker |
 | `make web-check`        | Frontend: type-check, unit test, dan build                                |
@@ -44,7 +44,7 @@ Saat mengembangkan frontend, jalankan `make run` di satu terminal dan `make web-
 | `make test-integration` | Unit test + integration test (butuh `make up` dan `TEST_DATABASE_URL`)    |
 | `make check`            | `lint` + integration test. Wajib lolos sebelum membuka PR                 |
 
-Port lokal: aplikasi `8080`, platform-db `5432`, target-db-1 `5433`, target-db-2 `5434`, test-db `5440`.
+Port lokal: aplikasi `8080`, platform-db `5432`, target-db-1 `5433`, target-db-2 `5434`, test-db `5440`, metrik server `9101`, metrik worker `9102`, Prometheus `9090`, Grafana `3000`.
 
 ## Akun demo
 
@@ -273,6 +273,56 @@ Contoh hasil nyata korelasi log dan trace di Grafana untuk trace `f67d7621283a19
 3. **Korelasi Trace → Logs (split view Tempo | Loki dengan query `{service_name=~".+"} |= "f67d7621283a197d3397d678aef116bb"`)**:
    ![Grafana split view Tempo dan Loki berkorelasi](docs/img/grafana-trace-to-logs-split.png)
 
+### Metrik Prometheus dan Dashboard Grafana
+
+Server dan worker masing-masing membuka endpoint `/metrics` berformat Prometheus di listener terpisah dari API: server di `:9101` (`METRICS_ADDR`) dan worker di `:9102` (`WORKER_METRICS_ADDR`). Isi `off` untuk mematikannya. Endpoint ini tidak memakai session dan tidak ikut port `8080`, sehingga akses ke metrik bisa dibatasi (firewall atau bind ke `127.0.0.1:9101`) tanpa memengaruhi API. `make obs-up` menyalakan **Prometheus** (`:9090`, konfigurasi `deploy/observability/prometheus.yml`) yang mengambil kedua endpoint lewat `host.docker.internal`, dan Grafana memuat datasource Prometheus serta dashboard **DBMP: Queue, Migration, dan Pool** (`deploy/observability/grafana-dashboards/dbmp-overview.json`, folder `DBMP`) secara otomatis.
+
+| Metrik | Jenis | Label | Isi |
+|--------|-------|-------|-----|
+| `dbmp_jobs` | gauge (server) | `status` | Job di `migration_jobs` per status: `queued` (menunggu), `running` (berjalan), `done` (selesai), `dead` (gagal). Dihitung dari database saat scrape, jadi tetap benar walau worker banyak atau baru restart. |
+| `dbmp_executions` | gauge (server) | `status` | Execution per status (`pending_review` sampai `uncertain`). |
+| `dbmp_jobs_processed_total`, `dbmp_job_duration_seconds` | counter, histogram (worker) | `outcome` | Job yang selesai diproses dan lamanya, per `success`, `done`, `retry`, `uncertain`, `failed`. |
+| `dbmp_job_retries_total` | counter (worker) | `reason` | Job yang diantre ulang: SQLSTATE yang bisa di-retry (mis. `55P03`), `lock_busy`, `db_busy` (execution lain sedang berjalan di database yang sama), `platform_record`, atau `deferred`. |
+| `dbmp_queue_wait_seconds` | histogram (worker) | – | Sejak job siap diambil (`run_after`) sampai diklaim worker. |
+| `dbmp_lock_wait_seconds` | histogram (worker) | – | Sejak job masuk antrian sampai kunci database target didapat, termasuk putaran antre ulang karena kunci dipegang execution lain. |
+| `dbmp_lock_acquire_seconds` | histogram (worker) | `result` | Satu percobaan mengambil kunci: `acquired`, `busy`, `error`. |
+| `dbmp_migration_duration_seconds` | histogram (worker) | `kind`, `mode`, `result` | Lama SQL migration di database target (`apply`/`rollback`, `normal`/`batch`, `success`/`failed`). |
+| `dbmp_batches_committed_total`, `dbmp_batch_rows_total` | counter (worker) | `direction` | Batch yang di-commit dan baris yang diproses, per `apply`/`revert`. |
+| `dbmp_db_pool_connections` | gauge | `pool`, `state` | Koneksi pool `platform` dan `target` per `active`, `idle`, `total`. |
+| `dbmp_db_pool_acquires_total`, `dbmp_db_pool_empty_acquires_total`, `dbmp_db_pool_acquire_wait_seconds_total` | counter | `pool` | Jumlah pengambilan koneksi, yang harus menunggu karena pool kosong, dan total waktu tunggunya. Rata-rata waktu tunggu = `rate(..._wait_seconds_total) / rate(..._acquires_total)`. |
+
+Label sengaja berkardinalitas rendah: semua nilainya berasal dari himpunan tetap. ID user, job, execution, nama database, dan teks SQL tidak pernah menjadi label (pool target dijumlahkan menjadi satu label `pool="target"`); detail per job tetap ada di log dan trace. `TestHandler_ExposesMetricsWithLowCardinalityLabels` memeriksa hal ini, dan `TestQueueCollector_ExportsEveryStatusFromDatabase` menjalankan lint Prometheus terhadap metrik dari database sungguhan.
+
+Contoh hasil nyata setelah lima migration di `target-db-1` (empat mode normal `SELECT pg_sleep(0.4)` dan satu batch `UPDATE page_views ... WHERE id > :from AND id <= :to`) diantrekan sekaligus dengan `WORKER_CONCURRENCY=2`. Karena satu database hanya boleh dikerjakan satu execution, job yang lain sempat menemukan kunci dipegang dan diantre ulang:
+
+```text
+# curl -s localhost:9102/metrics (worker, potongan)
+dbmp_jobs_processed_total{outcome="retry"} 10
+dbmp_jobs_processed_total{outcome="success"} 5
+dbmp_job_retries_total{reason="lock_busy"} 10
+dbmp_lock_acquire_seconds_count{result="acquired"} 10
+dbmp_lock_acquire_seconds_count{result="busy"} 10
+dbmp_lock_wait_seconds_sum 52.896
+dbmp_lock_wait_seconds_count 5
+dbmp_queue_wait_seconds_sum 11.370
+dbmp_queue_wait_seconds_count 15
+dbmp_migration_duration_seconds_count{kind="apply",mode="normal",result="success"} 4
+dbmp_migration_duration_seconds_count{kind="apply",mode="batch",result="success"} 1
+dbmp_batches_committed_total{direction="apply"} 1
+dbmp_batch_rows_total{direction="apply"} 200
+dbmp_db_pool_connections{pool="target",state="idle"} 1
+
+# curl -s localhost:9101/metrics (server, potongan)
+dbmp_jobs{status="dead"} 16
+dbmp_jobs{status="done"} 52
+dbmp_jobs{status="queued"} 0
+dbmp_jobs{status="running"} 0
+```
+
+Rata-rata tunggu kunci sekitar 10,6 detik per execution (52,9 detik / 5): job yang menemukan kunci sibuk menunggu jeda antre ulang 5 detik sebelum mencoba lagi, sedangkan SQL-nya sendiri hanya sekitar 0,4 detik. Waktu tunggu queue p95 sekitar 1 detik, sesuai interval polling worker (`WORKER_POLL_INTERVAL=1s`).
+
+![Dashboard Grafana metrik queue, lock, migration, dan pool](docs/img/grafana-metrics-dashboard.png)
+
 ## Mode Eksekusi per Batch (`internal/batch`)
 
 Untuk perubahan data berukuran besar, migration dapat dijalankan dalam mode `batch` (`exec_mode = 'batch'`) agar tidak menahan lock tabel dalam satu transaksi raksasa:
@@ -427,6 +477,23 @@ Batasan: `nextval()` pada sequence tidak ikut di-rollback, dan `EXPLAIN ANALYZE`
   - Milestone 2: approval dan leader (`internal/approval`), batch apply/resume/revert (`internal/batch`), rantai linear, immutability, Hide rollback, queue, retry, lock, revalidasi, hasil commit belum pasti, revert execution partial (`internal/migration`), serta korelasi trace dan event commit/rollback (`tracing_integration_test.go`).
   - Modul lain menguji kasus berhasil, gagal, dan ditolak untuk session (grace, absolute, idle, rotasi paralel), login dan CSRF, user/group, koneksi dan grant, explorer (paginasi, table tidak ada, nama table berisi SQL injection, target mati), migration, serta analisis EXPLAIN (filter ber-index menghasilkan Index Scan, tanpa index menghasilkan Seq Scan; `CREATE TABLE` + `INSERT` berhasil dianalisis dan table tidak tersisa; error per statement; user view ditolak).
 
+## SAST CodeQL
+
+Workflow `.github/workflows/codeql.yml` menjalankan CodeQL (suite `security-extended`) untuk Go dan JavaScript/TypeScript setiap push ke `main`, `feat/**`, `fix/**`, setiap pull request ke `main`, seminggu sekali, dan bisa dijalankan manual. Go dianalisis dengan `autobuild`, frontend tanpa build. Hasilnya muncul di tab **Security → Code scanning** repository (gratis karena repository publik).
+
+Scan pertama (commit `085e369`, CodeQL 2.27.6) memeriksa 35 rule Go dan 103 rule JavaScript/TypeScript. Frontend tidak punya temuan. Go punya 6 temuan, semuanya rule `go/log-injection` (severity medium): nilai dari request ditulis ke log.
+
+| # | Lokasi | Nilai dari user | Dampak | Keputusan |
+|---|--------|-----------------|--------|-----------|
+| 1 | `internal/httpx/middleware.go` (log `http.request`) | `r.URL.Path` | Path berisi newline atau karakter kontrol dapat mencoba memalsukan baris log; path sangat panjang memperbesar log. Log ditulis `slog` JSON yang sudah meng-escape karakter kontrol, jadi pemalsuan baris tidak terjadi pada konfigurasi sekarang. | **Diperbaiki**: nilai dilewatkan `logx.Safe` (buang `\n`, `\r`, dan karakter kontrol lain, potong 256 karakter). |
+| 6 | `internal/httpx/middleware.go` (log `panic`) | `r.URL.Path` | Sama dengan #1. | **Diperbaiki** dengan `logx.Safe`. |
+| 4 | `internal/httpx/httpx.go` (log `request error`) | `r.URL.Path` | Sama dengan #1. | **Diperbaiki** dengan `logx.Safe`. |
+| 5 | `internal/httpx/json.go` (log `request error`) | `r.URL.Path` | Sama dengan #1. | **Diperbaiki** dengan `logx.Safe`. |
+| 2 | `internal/api/auth.go` (log `auth.login_failed`) | `username` dari body login | Username bebas diisi penyerang tanpa login, jadi paling mudah dipakai untuk mengotori log. | **Diperbaiki** dengan `logx.Safe`. Password tetap tidak pernah di-log. |
+| 3 | `internal/explain/handler.go` (log `migration.explained`) | `analyze` dari body request | Nilainya `bool` hasil decode JSON, sehingga hanya bisa `true` atau `false` dan tidak bisa membawa teks. | **False positive**, alert di-dismiss dengan alasan tersebut. |
+
+Perbaikan diuji oleh `TestSafe_RemovesControlCharactersAndTruncates` (newline, `\r`, tab, NUL, escape ANSI dibuang; potongan tetap UTF-8 valid). Workflow memakai `actions/checkout@v5`, `actions/setup-go@v6`, dan `github/codeql-action@v4` (runtime Node.js 24) setelah scan pertama memberi peringatan bahwa Node.js 20 dan CodeQL Action v3 akan dihentikan.
+
 ## Struktur
 
 ```
@@ -442,6 +509,7 @@ internal/api        endpoint JSON (/api) untuk auth, admin, dan approval
 internal/logx       log JSON terstruktur, redaksi, correlation ID, audit
 internal/spa        penyaji hasil build frontend
 internal/telemetry  OpenTelemetry tracing, propagasi queue (Inject/Extract), HTTPMiddleware, PgxTracer
+internal/metrics    metrik Prometheus (/metrics), collector status job dan pool koneksi
 internal/batch      eksekusi migration per batch, checkpoint target (_dbmp.batch_checkpoints), resume & revert terbalik
 frontend            SPA (React + Vite + TypeScript)
 internal/dbconn     koneksi, enkripsi kredensial, pool
@@ -470,6 +538,6 @@ Status bonus:
 | M1: analisis EXPLAIN | Dikerjakan (bagian Analisis EXPLAIN). |
 | M1: MySQL/MariaDB, schema diff, migration generation | Tidak dikerjakan. Untuk MySQL/MariaDB, DDL melakukan implicit commit sehingga jaminan rollback migration tidak bisa dipenuhi. |
 | M2: pengumpulan super cepat | Tidak diambil. |
-| M2: observability | Sebagian: log dan trace dikumpulkan lewat OpenTelemetry Collector ke Loki dan Tempo dengan korelasi dua arah di Grafana. Endpoint metrik Prometheus dan dashboard Grafana untuk metrik queue/pool belum ada. |
+| M2: observability | Dikerjakan: log dan trace dikumpulkan lewat OpenTelemetry Collector ke Loki dan Tempo dengan korelasi dua arah di Grafana, ditambah endpoint metrik Prometheus (server dan worker) dan dashboard Grafana ter-provision untuk job, retry, waktu tunggu queue dan lock, durasi migration, batch, dan pool koneksi (bagian Metrik Prometheus dan Dashboard Grafana). |
 | M2: stress test k6 | Dikerjakan: baca naik lalu turun (beban normal 5 VU sampai 200), plus job yang sudah di-approve di dua database. Hasil dan analisis di bagian Stress test k6. |
-| M2: SAST CodeQL | Belum. |
+| M2: SAST CodeQL | Dikerjakan: workflow CodeQL untuk Go dan TypeScript, 6 temuan ditriase (5 diperbaiki, 1 false positive) di bagian SAST CodeQL. |
